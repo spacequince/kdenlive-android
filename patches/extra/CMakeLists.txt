@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+project(mlt_aaudio C)
+set(R $ENV{HOME}/kdenlive-android/CraftRoot)
+add_library(mltaaudio MODULE consumer_aaudio.c)
+set_target_properties(mltaaudio PROPERTIES PREFIX "lib" C_STANDARD 11)
+target_include_directories(mltaaudio PRIVATE ${R}/include/mlt-7)
+target_link_libraries(mltaaudio PRIVATE ${R}/lib/libmlt-7_arm64-v8a.so aaudio log m)

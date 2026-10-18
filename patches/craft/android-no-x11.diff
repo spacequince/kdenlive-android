@@ -1,0 +1,20 @@
+--- a/src/qtwidgets/views/ClassicIndicatorsWindow.cpp	2026-10-15 21:53:36.901283230 -0600
++++ b/src/qtwidgets/views/ClassicIndicatorsWindow.cpp	2026-10-15 21:53:36.905530870 -0600
+@@ -24,7 +24,7 @@
+ 
+ #ifdef QT_X11EXTRAS_LIB
+ #include <QtX11Extras/QX11Info>
+-#elif QT_VERSION >= QT_VERSION_CHECK(6, 0, 0) && defined(Q_OS_LINUX)
++#elif QT_VERSION >= QT_VERSION_CHECK(6, 0, 0) && defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID)
+ #include <QtGui/private/qtx11extras_p.h>
+ #endif
+ 
+@@ -45,7 +45,7 @@
+         || (Config::self().internalFlags() & Config::InternalFlag_DisableTranslucency))
+         return false;
+ 
+-#if defined(QT_X11EXTRAS_LIB) || (QT_VERSION >= QT_VERSION_CHECK(6, 0, 0) && defined(Q_OS_LINUX))
++#if defined(QT_X11EXTRAS_LIB) || (QT_VERSION >= QT_VERSION_CHECK(6, 0, 0) && defined(Q_OS_LINUX) && !defined(Q_OS_ANDROID))
+     if (isXCB())
+         return QX11Info::isCompositingManagerRunning();
+ #endif

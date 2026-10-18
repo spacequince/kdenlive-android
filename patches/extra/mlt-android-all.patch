@@ -1,0 +1,153 @@
+diff --git a/src/framework/mlt_factory.c b/src/framework/mlt_factory.c
+index f8885f8b..2d85258f 100644
+--- a/src/framework/mlt_factory.c
++++ b/src/framework/mlt_factory.c
+@@ -177,6 +177,11 @@ mlt_repository mlt_factory_init(const char *directory)
+         // Store the prefix for later retrieval
+         mlt_directory = strdup(directory);
+ #else
++#ifdef __ANDROID__
++        /* inside an APK the "app directory" is meaningless: the app (and melt) gets the module directory from the environment */
++        if ((directory == NULL || !strcmp(directory, "")) && getenv("MLT_REPOSITORY"))
++            directory = getenv("MLT_REPOSITORY");
++#endif
+         if (directory) {
+             mlt_directory = strdup(directory);
+         } else {
+diff --git a/src/framework/mlt_repository.c b/src/framework/mlt_repository.c
+index b82a347a..e1490a25 100644
+--- a/src/framework/mlt_repository.c
++++ b/src/framework/mlt_repository.c
+@@ -126,6 +126,17 @@ mlt_repository mlt_repository_init(const char *directory)
+         // Skip invalid current & parent entries
+         if (!object_name)
+             continue;
++#ifdef __ANDROID__
++        {
++            /* The Android native library directory also holds Qt, ffmpeg, ... libraries: only try the MLT modules
++               (libmlt<name>.so, but not the core libraries libmlt-7*.so / libmlt++-7*.so) */
++            const char *base = strrchr(object_name, '/');
++            base = base ? base + 1 : object_name;
++            if (strncmp(base, "libmlt", 6) != 0 || strncmp(base, "libmlt-7", 8) == 0
++                || strncmp(base, "libmlt++", 8) == 0)
++                continue;
++        }
++#endif
+         size_t object_name_len = strlen(object_name);
+         if ((object_name_len >= 2 && strcmp(object_name + object_name_len - 2, "/.") == 0)
+             || (object_name_len >= 3 && strcmp(object_name + object_name_len - 3, "/..") == 0))
+diff --git a/src/modules/frei0r/CMakeLists.txt b/src/modules/frei0r/CMakeLists.txt
+index ebc84ea8..d4a01d4b 100644
+--- a/src/modules/frei0r/CMakeLists.txt
++++ b/src/modules/frei0r/CMakeLists.txt
+@@ -29,6 +29,9 @@ if(RELOCATABLE)
+ endif()
+ 
+ target_link_libraries(mltfrei0r PRIVATE mlt ${CMAKE_DL_LIBS})
++if(ANDROID)
++  target_link_libraries(mltfrei0r PRIVATE log)
++endif()
+ 
+ if(MSVC)
+   target_link_libraries(mltfrei0r PRIVATE dirent)
+diff --git a/src/modules/frei0r/factory.c b/src/modules/frei0r/factory.c
+index bad201d6..da69493a 100644
+--- a/src/modules/frei0r/factory.c
++++ b/src/modules/frei0r/factory.c
+@@ -38,6 +38,15 @@
+ #define FREI0R_PLUGIN_PATH "\\lib\\frei0r-1"
+ #else
+ #define LIBSUF ".so"
++
++#ifdef __ANDROID__
++#include <android/log.h>
++/* Android only packages native libraries named lib*.so: plugins are shipped as libfrei0r_<name>.so
++   and the service id is still frei0r.<name> */
++#define F0R_FILE_PREFIX "libfrei0r_"
++#else
++#define F0R_FILE_PREFIX ""
++#endif
+ #ifdef RELOCATABLE
+ #ifdef __APPLE__
+ #define FREI0R_PLUGIN_PATH "/PlugIns/frei0r-1"
+@@ -68,6 +77,11 @@ extern mlt_frame transition_process(mlt_transition transition, mlt_frame a_frame
+ 
+ static char *get_frei0r_path()
+ {
++#ifdef __ANDROID__
++    /* RELOCATABLE builds derive the path from the executable location, which is meaningless inside an APK */
++    if (getenv("FREI0R_PATH"))
++        return strdup(getenv("FREI0R_PATH"));
++#endif
+ #if defined(_WIN32) || defined(RELOCATABLE)
+     char *dirname = malloc(strlen(mlt_environment("MLT_APPDIR")) + strlen(FREI0R_PLUGIN_PATH) + 1);
+     strcpy(dirname, mlt_environment("MLT_APPDIR"));
+@@ -493,11 +507,11 @@ static void *create_frei0r_item(mlt_profile profile,
+         firstname = strtok_r(NULL, ".", &save_firstptr);
+ #endif
+         if (strncmp(directory, "$HOME", 5))
+-            snprintf(soname, PATH_MAX, "%s/%s" LIBSUF, directory, firstname);
++            snprintf(soname, PATH_MAX, "%s/" F0R_FILE_PREFIX "%s" LIBSUF, directory, firstname);
+         else
+             snprintf(soname,
+                      PATH_MAX,
+-                     "%s%s/%s" LIBSUF,
++                     "%s%s/" F0R_FILE_PREFIX "%s" LIBSUF,
+                      getenv("HOME"),
+                      strchr(directory, '/'),
+                      firstname);
+@@ -590,6 +604,13 @@ MLTFREI0R_EXPORT MLT_REPOSITORY
+         for (int i = 0; i < mlt_properties_count(direntries); i++) {
+             char *name = mlt_properties_get_value(direntries, i);
+             char *shortname = name + strlen(dirname) + 1;
++#ifdef __ANDROID__
++            /* the app's native lib directory also holds Qt, KDE, ffmpeg... libraries: only look at frei0r plugins */
++            if (strncmp(shortname, F0R_FILE_PREFIX, strlen(F0R_FILE_PREFIX)))
++                continue;
++
++            shortname += strlen(F0R_FILE_PREFIX);
++#endif
+ #ifdef _WIN32
+             char *firstname = strtok(shortname, ".");
+ #else
+@@ -606,6 +627,10 @@ MLTFREI0R_EXPORT MLT_REPOSITORY
+             mlt_properties plugin_aliases = mlt_properties_get_data(aliases, pluginname, NULL);
+ 
+             void *handle = dlopen(strcat(name, LIBSUF), RTLD_LAZY);
++#ifdef __ANDROID__
++            if (!handle)
++                __android_log_print(ANDROID_LOG_WARN, "MLTfrei0r", "cannot load %s: %s", name, dlerror());
++#endif
+             if (handle) {
+                 void (*plginfo)(f0r_plugin_info_t *) = dlsym(handle, "f0r_get_plugin_info");
+ 
+diff --git a/src/modules/jackrack/plugin_mgr.c b/src/modules/jackrack/plugin_mgr.c
+index cf0b41fa..0baefa37 100644
+--- a/src/modules/jackrack/plugin_mgr.c
++++ b/src/modules/jackrack/plugin_mgr.c
+@@ -349,6 +349,14 @@ static void plugin_mgr_get_dir_plugins(plugin_mgr_t *plugin_mgr, const char *dir
+             strcpy(file_name + dirlen + 1, dir_entry->d_name);
+         }
+ 
++#ifdef __ANDROID__
++        /* the native library directory also holds Qt, KDE, ffmpeg... libraries: only look at LADSPA plugins
++           (shipped as libladspa_<name>.so because Android only packages lib*.so) */
++        if (strncmp(dir_entry->d_name, "libladspa_", 10) != 0) {
++            g_free(file_name);
++            continue;
++        }
++#endif
+         stat(file_name, &info);
+         if (S_ISDIR(info.st_mode))
+             plugin_mgr_get_dir_plugins(plugin_mgr, file_name);
+@@ -389,6 +397,10 @@ static void plugin_mgr_get_path_plugins(plugin_mgr_t *plugin_mgr)
+ #define LADSPA_SUBDIR "/PlugIns/ladspa"
+ #else
+ #define LADSPA_SUBDIR "/lib/ladspa"
++#endif
++#ifdef __ANDROID__
++    /* inside an APK the app directory is meaningless: LADSPA_PATH (the native library dir) is set by the app */
++    if (!ladspa_path)
+ #endif
+     {
+         ladspa_path = malloc(strlen(mlt_environment("MLT_APPDIR")) + strlen(LADSPA_SUBDIR) + 1);

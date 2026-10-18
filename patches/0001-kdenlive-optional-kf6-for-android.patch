@@ -1,0 +1,2355 @@
+diff --git a/ANDROID-TODO.md b/ANDROID-TODO.md
+new file mode 100644
+index 0000000..98225c6
+--- /dev/null
++++ b/ANDROID-TODO.md
+@@ -0,0 +1,48 @@
++# Android port: TODO list
++
++## Touch support (currently only a basic fallback for mouse + keyboard use)
++
++Done (src/android/androidui.cpp):
++- Taps work as left clicks (Qt synthesizes mouse events from touch).
++- Long press (600 ms, finger not moving) sends a right click + context menu event.
++
++Missing, in rough priority order:
++- Scrolling lists, the project bin and the effect list by dragging (needs QScroller, but it conflicts with
++  drag & drop of clips from the bin: needs a rule such as "drag starting on a clip = DnD, elsewhere = scroll").
++- Two-finger pan and pinch-zoom on the timeline and the monitors (QML pinch/wheel handlers).
++- Selecting timeline clips by touch: a tap on a clip only moves the playhead in the tests done so far.
++- Larger touch targets for toolbar buttons, track headers, splitter handles, scrollbars and menu items.
++- Touch-friendly dragging of clip edges (trim) and of keyframes.
++- On-screen keyboard: it takes the whole screen in landscape and hides the dialog being edited.
++- Hardware keyboard shortcuts work; add a touch bar for the common ones (play, cut, undo).
++- Portrait layout (not started).
++
++## Other
++- Release signing and a real application id (still org.qtproject.example.kdenlive, debug-signed).
++- cairo-based frei0r plugins, OpenCV-based effects, Movit effects.
++- Importing very large videos uses the original file in place only when media permissions are granted.
++
++## Bugs reported from manual testing (2026-10-16), to investigate with the phone connected
++- "Rendering warning" at every project load: fixed in `previewmanager.cpp` (the missing kdenlive_render error is skipped on Android). Timeline preview rendering (needs kdenlive_render) is still unavailable.
++- Crashes (user's manual test, 5 recorded 16:50-17:24, all on the Qt main thread):
++  * 4x SIGABRT `Failed to acquire deadlock protector for QAndroidPlatformOpenGLWindow::eglSurface()` (Qt Android: `QOpenGLContext::makeCurrent` from `QRhi::create` / `QRhi::beginFrame` in the widgets backing-store flush). Qt's Android plugin gives up when the Android UI thread holds the surface lock (surface being created/resized/destroyed: new dialog/floating windows, soft keyboard showing/hiding, resume) while the Qt thread is busy. Not Kdenlive code. Ideas: find which action triggers it (repro!), avoid creating extra top-level native windows (floating docks, dialogs) while the main thread is busy, keep `windowSoftInputMode` from resizing the surface (adjustPan/adjustNothing in the manifest), try the OpenGL-less widgets backing store (QT_WIDGETS_RHI) or a newer Qt.
++  * 1x SIGSEGV (null read, fault addr 0x8) in KDDockWidgets 2.4.1: `StateDragging::handleMouseMove` -> `WindowBeingDragged::floatingWindow()` (DragController.cpp:441) while dragging a dock panel with a mouse event. Idea: on Android disable dock floating/dragging (KDDockWidgets Config flags) or guard against the null window.
++  * DOCK CRASH FIX (done): `core.cpp` drag-about-to-start hook returns false on Android (no dock dragging) + `Flag_TitleBarNoFloatButton` (mainwindow.cpp). Verified: dragging dock tabs with the mouse no longer crashes. Trade-off: panels cannot be rearranged by dragging (use layouts/presets); floating panels are gone. The 4 deadlock aborts: see 'eglSurface abort fix' below.
++  * Still needed: the user's description of what they were doing; earlier log lines had rotated out of the logcat buffer. Pull `adb logcat -b crash` / `-d | grep "Fatal signal"` right after one, symbolize with `llvm-symbolizer -e build/kdenlive-arm64/lib/libkdenlive_arm64-v8a.so`.
++- [FIX APPLIED, needs the user's retest] Editing a title clip's text with touch (title editor, `titler/`) — androidui.cpp now sets `ImhNoPredictiveText|ImhNoAutoUppercase` on every QLineEdit/QSpinBox/QTextEdit/QPlainTextEdit when focused and `MyTextItem` sets it for the scene text item; verified the keyboard gets inputType 0x80001 (NO_SUGGESTIONS). Original report: the Android keyboard opens, but changing the value deletes text irreversibly and no new text can be typed. Probably the QGraphicsTextItem input-method handling (preedit/commit, Qt::ImhNoPredictiveText missing) or the Android IME composing region. Try disabling predictive text on that widget.
++- "Pastes from clipboard on startup?": Android shows a "pasted from your clipboard" notice when an app reads the clipboard; no read at startup found in Kdenlive's code (only on paste actions). Check `adb logcat | grep -i clip` at launch to find the caller (maybe a Qt/KDE widget such as the Paste action or a line edit).
++- Not a bug, a note: toolbar icons were resized by the user, folders were added in the bin (settings/project persist OK).
++
++## Scoped-storage audit of media jobs (done, verified on the Pixel 9 Pro by mouse)
++- Speed Change and Stabilize wrote their .mlt (and .trf) next to the source clip in shared storage and failed silently: fixed, both now write to AppDataLocation (Speed Change/ and Stabilize/ folders).
++- Automatic Scene Split (ffmpeg scene filter, adds range markers), Proxy (mjpeg proxy in the app cache) and Transcode work unchanged.
++- Cut-clip and custom jobs write media next to the source and were not exercised.
++
++## eglSurface abort fix (applied, smoke-tested; user to confirm in daily use)
++Cause (Qt 6.11.2 source): any new top-level window (menu, dialog, tooltip, combo popup) is a `QAndroidPlatformOpenGLWindow`; its first paint calls `eglSurface()`, which takes the single global `AndroidDeadlockProtector` flag and `qFatal`s if it is taken. The flag is held by the Android UI thread while it blocks on the Qt thread (soft-keyboard IME calls `runOnQtThread`, accessibility `runInObjectContext`), so opening a popup while the keyboard/IME is querying the text field aborts the app.
++Fix: `build/patch_qt_android_plugin.sh` binary-patches the plugin (`CraftRoot/plugins/platforms/libplugins_platforms_qtforandroid_arm64-v8a.so`, original kept as `.orig`) so the failure branch skips the frame and returns EGL_NO_SURFACE; the window retries on its next flush. Worst case is one blank popup instead of a crash. Re-run the script after any Craft reinstall of qtbase. Cleaner long-term fix: build the plugin from source with a retry loop that pumps the input-context's queued calls. Smoke test: 40 menu/context-menu open/close cycles, no abort.
++
++## Cut-clip and custom jobs (verified by mouse on the Pixel 9 Pro, 2026-10-17)
++- Extract Zone (clip monitor right-click, CutTask): ffmpeg stream copy wrote `waterfall_cascade-7-8.mov` next to the source in Movies/ and it appeared in the bin (2:05). Works unchanged.
++- Custom job: the stock "My Custom job" has an empty Executable, so it shows "Application not found" until configured. Configured it via Media Jobs > Configure Clip Jobs with Executable = the app's `lib/arm64/libffmpeg.so` (path from `dumpsys package`, changes per install), args `-i {source} -vf hue=s=0 -t 2 {output}`, extension `mp4`: wrote `waterfall_cascade-0001.mp4` (grayscale, 2 s) and added it to the bin. Works unchanged.
++- Fixed: the stock "My Custom job" Executable is now pre-filled with `KdenliveSettings::ffmpegpath()` on Android (clipjobmanager.cpp, in both the settings dialog and `getJobParameters`) when none is saved; verified after a reinstall (shows the new per-install lib path). Arguments are still empty for the stock job.
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 79ab98e..ff8cb68 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -80,6 +80,12 @@ if (NOT DEFINED KF_MAJOR)
+   set(KF_MAJOR ${QT_MAJOR_VERSION})
+ endif()
+ 
++if(ANDROID)
++    set(KDENLIVE_OPTIONAL_KF_EXTRA NotifyConfig NewStuff FileMetaData Purpose)
++else()
++    set(KDENLIVE_REQUIRED_KF_EXTRA NotifyConfig NewStuff FileMetaData Purpose)
++endif()
++
+ add_definitions(-DTRANSLATION_DOMAIN=\"kdenlive\")
+ find_package(KF${KF_MAJOR} ${KF_DEP_VERSION}
+     REQUIRED COMPONENTS
+@@ -92,22 +98,36 @@ find_package(KF${KF_MAJOR} ${KF_DEP_VERSION}
+     ConfigWidgets
+     KIO
+     WidgetsAddons
+-    NotifyConfig
+-    NewStuff
+     XmlGui
+     Notifications
+     GuiAddons
+     TextWidgets
+     IconThemes
+     Solid
+-    FileMetaData
+-    Purpose
++    ${KDENLIVE_REQUIRED_KF_EXTRA}
+ 
+     OPTIONAL_COMPONENTS
+     DocTools
+     Crash
++    ${KDENLIVE_OPTIONAL_KF_EXTRA}
+ )
+ 
++# These frameworks have no Android build. Treat them as optional there and
++# compile the features that depend on them out.
++# KIOFileWidgets (KDirOperator, KFileWidget...) is not built for Android: use the system file picker
++if(ANDROID)
++    add_compile_definitions(KDENLIVE_NO_KIOFILEWIDGETS)
++    set(KDENLIVE_NO_KIOFILEWIDGETS TRUE)
++endif()
++
++foreach(_kdenlive_kf NotifyConfig NewStuff FileMetaData Purpose)
++    string(TOUPPER ${_kdenlive_kf} _kdenlive_kf_upper)
++    if(NOT KF${KF_MAJOR}${_kdenlive_kf}_FOUND)
++        add_compile_definitions(KDENLIVE_NO_${_kdenlive_kf_upper})
++        set(KDENLIVE_NO_${_kdenlive_kf_upper} TRUE)
++    endif()
++endforeach()
++
+ ecm_set_disabled_deprecation_versions(
+     QT ${QT_MIN_VERSION}
+     KF ${KF_DEP_VERSION}
+diff --git a/data/CMakeLists.txt b/data/CMakeLists.txt
+index a056e68..8e2d215 100644
+--- a/data/CMakeLists.txt
++++ b/data/CMakeLists.txt
+@@ -6,7 +6,9 @@ add_subdirectory(generators)
+ add_subdirectory(layouts)
+ add_subdirectory(transitions)
+ add_subdirectory(icons)
+-add_subdirectory(knewstuff)
++if(NOT KDENLIVE_NO_NEWSTUFF)
++    add_subdirectory(knewstuff)
++endif()
+ add_subdirectory(lumas)
+ add_subdirectory(scripts)
+ add_subdirectory(man)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 23f688d..be61acc 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -241,6 +241,26 @@ set_target_properties(kdenlive PROPERTIES
+ #set_target_properties(kdenlive PROPERTIES MACOSX_BUNDLE ON)
+ endif()
+ 
++if(ANDROID)
++    # androiddeployqt expects lib<name>_<abi>.so
++    set_target_properties(kdenlive PROPERTIES PREFIX "lib")
++    # let androiddeployqt find QML modules from KF6 (e.g. org.kde.ki18n)
++    set_property(TARGET kdenlive APPEND PROPERTY QT_QML_IMPORT_PATH "${CMAKE_INSTALL_PREFIX}/lib/qml")
++    target_sources(kdenlive PRIVATE android/androidsetup.cpp android/androidrender.cpp android/androidui.cpp)
++    # MLT looks for its modules by scanning a directory, so native libs must be extracted
++    set_property(TARGET kdenlive PROPERTY QT_ANDROID_LEGACY_PACKAGING ON)
++    # staged by build/prep_libs.sh: MLT modules + deps (ffmpeg extras, rubberband, ...) with Android-friendly sonames
++    file(GLOB KDENLIVE_ANDROID_MLT_MODULES "${KDENLIVE_ANDROID_LIBS_DIR}/*.so")
++    # TODO: frei0r plugins need names starting with "lib" (MLT derives service ids from file names)
++    set_property(TARGET kdenlive APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${KDENLIVE_ANDROID_MLT_MODULES})
++    # assets (MLT data, Kdenlive data) are prepared in KDENLIVE_ANDROID_PKG_DIR/assets
++    set_property(TARGET kdenlive PROPERTY QT_ANDROID_APP_NAME "Kdenlive")
++    set_property(TARGET kdenlive PROPERTY QT_ANDROID_APP_ICON "@mipmap/ic_launcher")
++    if(KDENLIVE_ANDROID_PKG_DIR)
++        set_property(TARGET kdenlive PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR "${KDENLIVE_ANDROID_PKG_DIR}")
++    endif()
++endif()
++
+ target_link_libraries(kdenlive PUBLIC kdenliveLib kdenliveLibplugin)
+ install(TARGETS kdenlive DESTINATION ${KDE_INSTALL_BINDIR})
+ 
+@@ -270,19 +290,15 @@ target_link_libraries(kdenliveLib PUBLIC
+     KF${KF_MAJOR}::CoreAddons
+     KF${KF_MAJOR}::KIOCore
+     KF${KF_MAJOR}::Codecs
+-    KF${KF_MAJOR}::KIOFileWidgets
+     KF${KF_MAJOR}::KIOWidgets
+-    KF${KF_MAJOR}::NewStuffWidgets
+-    KF${KF_MAJOR}::NotifyConfig
+     KF${KF_MAJOR}::XmlGui
+     KF${KF_MAJOR}::GuiAddons
+     KF${KF_MAJOR}::Notifications
+     KF${KF_MAJOR}::TextWidgets
+     KF${KF_MAJOR}::IconThemes
+     KF${KF_MAJOR}::Solid
+-    KF${KF_MAJOR}::FileMetaData
+-    KF${KF_MAJOR}::Purpose
+-    KF${KF_MAJOR}::PurposeWidgets
++    KF${KF_MAJOR}::ItemViews
++    KF${KF_MAJOR}::Bookmarks
+     ${OPENGL_LIBRARIES}
+     ${OPENGLES_LIBRARIES}
+     Mlt7::mlt++
+@@ -292,6 +308,26 @@ target_link_libraries(kdenliveLib PUBLIC
+     kiss_fft
+     )
+ 
++if(NOT KDENLIVE_NO_KIOFILEWIDGETS)
++  target_link_libraries(kdenliveLib PUBLIC KF${KF_MAJOR}::KIOFileWidgets)
++endif()
++if(NOT KDENLIVE_NO_NEWSTUFF)
++  target_link_libraries(kdenliveLib PUBLIC KF${KF_MAJOR}::NewStuffWidgets)
++else()
++  # KNewStuff-less build: provide hidden stand-ins for the types used by the .ui files
++  target_sources(kdenliveLib PRIVATE android/knsstubs.h)
++  target_include_directories(kdenliveLib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/android/stubs)
++endif()
++if(NOT KDENLIVE_NO_NOTIFYCONFIG)
++  target_link_libraries(kdenliveLib PUBLIC KF${KF_MAJOR}::NotifyConfig)
++endif()
++if(NOT KDENLIVE_NO_FILEMETADATA)
++  target_link_libraries(kdenliveLib PUBLIC KF${KF_MAJOR}::FileMetaData)
++endif()
++if(NOT KDENLIVE_NO_PURPOSE)
++  target_link_libraries(kdenliveLib PUBLIC KF${KF_MAJOR}::Purpose KF${KF_MAJOR}::PurposeWidgets)
++endif()
++
+ if(KF6_VERSION VERSION_GREATER_EQUAL "6.8.0")
+   target_link_libraries(kdenliveLib PUBLIC KF${KF_MAJOR}::I18nQml)
+ endif()
+diff --git a/src/android/androidrender.cpp b/src/android/androidrender.cpp
+new file mode 100644
+index 0000000..8193fa3
+--- /dev/null
++++ b/src/android/androidrender.cpp
+@@ -0,0 +1,256 @@
++/*
++    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#include "androidrender.h"
++
++#include <QDebug>
++#include <QDomDocument>
++#include <QFile>
++#include <QFileInfo>
++#include <QProcess>
++#include <QThread>
++
++#include "androidsetup.h"
++
++#include <mlt++/Mlt.h>
++
++#include <dlfcn.h>
++extern "C" {
++#include <libavfilter/avfilter.h>
++}
++
++AndroidRender *AndroidRender::instance()
++{
++    static AndroidRender *s_instance = new AndroidRender();
++    return s_instance;
++}
++
++AndroidRender::AndroidRender(QObject *parent)
++    : QObject(parent)
++{
++}
++
++void AndroidRender::start(const QString &playlist)
++{
++    m_abort = false;
++    QThread *t = QThread::create([this, playlist]() { run(playlist); });
++    connect(t, &QThread::finished, t, &QObject::deleteLater);
++    t->start();
++}
++
++void AndroidRender::abort(const QString &url)
++{
++    if (url == m_runningUrl) {
++        m_abort = true;
++    }
++}
++
++void AndroidRender::abortAll()
++{
++    m_abort = true;
++}
++
++void AndroidRender::run(const QString &playlist)
++{
++    // Same information kdenlive_render reads from the playlist
++    int in = -1;
++    int out = -1;
++    QString target;
++    QFile f(playlist);
++    QDomDocument doc;
++    if (f.open(QIODevice::ReadOnly) && doc.setContent(&f)) {
++        const QDomElement consumer = doc.documentElement().firstChildElement(QStringLiteral("consumer"));
++        if (!consumer.isNull()) {
++            in = consumer.attribute(QStringLiteral("in"), QStringLiteral("-1")).toInt();
++            out = consumer.attribute(QStringLiteral("out"), QStringLiteral("-1")).toInt();
++            target = consumer.attribute(QStringLiteral("target"));
++        }
++    }
++    f.close();
++    m_runningUrl = target;
++    const QString jobTitle = QFileInfo(target).fileName();
++    androidRenderServiceStart(jobTitle);
++    qDebug() << "Android render: playlist" << playlist << "target" << target << "in" << in << "out" << out;
++
++    Mlt::Profile profile;
++    Mlt::Producer producer(profile, "xml", playlist.toUtf8().constData());
++    if (!producer.is_valid()) {
++        androidRenderServiceStop();
++        androidRenderServiceFinished(QString(), jobTitle, false, QStringLiteral("Failed to load the project playlist"));
++        Q_EMIT finished(target, -2, QStringLiteral("Failed to load the project playlist"));
++        return;
++    }
++    // producer_xml keeps the consumer defined in the playlist as the "consumer" data property
++    mlt_consumer consumer = static_cast<mlt_consumer>(mlt_properties_get_data(MLT_PRODUCER_PROPERTIES(producer.get_producer()), "consumer", nullptr));
++    if (consumer == nullptr) {
++        androidRenderServiceStop();
++        androidRenderServiceFinished(QString(), jobTitle, false, QStringLiteral("The playlist does not define an output (consumer)"));
++        Q_EMIT finished(target, -2, QStringLiteral("The playlist does not define an output (consumer)"));
++        return;
++    }
++    mlt_properties props = MLT_CONSUMER_PROPERTIES(consumer);
++    mlt_properties_set_int(props, "terminate_on_pause", 1);
++
++    const int cin = mlt_properties_get_int(props, "in");
++    const int cout = mlt_properties_get_int(props, "out");
++    if (cin > 0 || cout > 0) {
++        mlt_producer_set_in_and_out(producer.get_producer(), cin, cout > 0 ? cout : producer.get_length() - 1);
++        mlt_producer_seek(producer.get_producer(), 0);
++    }
++    const int total = qMax(1, producer.get_playtime());
++
++    mlt_consumer_connect(consumer, producer.get_service());
++    if (mlt_consumer_start(consumer) != 0) {
++        mlt_consumer_connect(consumer, nullptr);
++        androidRenderServiceStop();
++        androidRenderServiceFinished(QString(), jobTitle, false, QStringLiteral("Could not start the encoder"));
++        Q_EMIT finished(target, -2, QStringLiteral("Could not start the encoder"));
++        return;
++    }
++
++    int lastProgress = 0;
++    while (!mlt_consumer_is_stopped(consumer)) {
++        if (m_abort) {
++            break;
++        }
++        const int pos = mlt_consumer_position(consumer);
++        const int percent = qBound(0, pos * 100 / total, 100);
++        if (percent > lastProgress) {
++            lastProgress = percent;
++            Q_EMIT progress(target, percent, pos);
++            androidRenderServiceProgress(jobTitle, percent);
++        }
++        // consumers without terminate_on_pause support: stop once the end is reached
++        if (pos >= total - 1 && pos > 0) {
++            QThread::msleep(500);
++            if (!mlt_consumer_is_stopped(consumer)) {
++                break;
++            }
++        }
++        QThread::msleep(200);
++    }
++    const bool aborted = m_abort;
++    mlt_consumer_stop(consumer);
++    mlt_consumer_connect(consumer, nullptr);
++
++    androidRenderServiceStop();
++    if (aborted) {
++        QFile::remove(target);
++        Q_EMIT finished(target, -3, QString());
++    } else if (!QFileInfo::exists(target) || QFileInfo(target).size() < 1024) {
++        // an empty file means the encoder failed (e.g. unsupported pixel format or codec)
++        QFile::remove(target);
++        androidRenderServiceFinished(QString(), jobTitle, false, QStringLiteral("The encoder failed to produce any video. Try another render preset."));
++        Q_EMIT finished(target, -2, QStringLiteral("The encoder failed to produce any video. Try another render preset."));
++    } else {
++        Q_EMIT progress(target, 100, total);
++        // make the video visible to the gallery / file manager apps (Movies/Kdenlive)
++        const QString contentUri = androidPublishVideo(target);
++        androidRenderServiceFinished(contentUri, jobTitle, true, QString());
++        Q_EMIT finished(target, 0, QString());
++    }
++    m_runningUrl.clear();
++}
++
++void androidDevSelfTest()
++{
++    const QString dir = QStringLiteral("/storage/emulated/0/Android/data/org.qtproject.example.kdenlive/files/");
++    QFile list(dir + QStringLiteral("selftest.txt"));
++    if (!list.open(QIODevice::ReadOnly)) {
++        return;
++    }
++    const QStringList filters = QString::fromUtf8(list.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
++    list.close();
++    // "av:<name>" lines: report how libavfilter describes a filter (the same test MLT applies before registering it)
++    void *avf = dlopen("libavfilter.so", RTLD_NOW);
++    using GetByName = const AVFilter *(*)(const char *);
++    using PadCount = unsigned (*)(const AVFilter *, int);
++    using PadType = enum AVMediaType (*)(const AVFilterPad *, int);
++    auto getByName = avf ? reinterpret_cast<GetByName>(dlsym(avf, "avfilter_get_by_name")) : nullptr;
++    auto padCount = avf ? reinterpret_cast<PadCount>(dlsym(avf, "avfilter_filter_pad_count")) : nullptr;
++    auto padType = avf ? reinterpret_cast<PadType>(dlsym(avf, "avfilter_pad_get_type")) : nullptr;
++    QStringList mltFilters;
++    for (const QString &line : filters) {
++        if (line.startsWith(QLatin1String("exec:"))) {
++            // exec:<program in native lib dir> <args...>   e.g. exec:libmelt.so -query consumers
++            const QStringList parts = line.mid(5).trimmed().split(QLatin1Char(' '), Qt::SkipEmptyParts);
++            if (parts.isEmpty()) {
++                continue;
++            }
++            const QString program = androidNativeLibDir() + QLatin1Char('/') + parts.first();
++            QProcess process;
++            process.start(program, parts.mid(1));
++            const bool started = process.waitForStarted(5000);
++            const bool finished = started && process.waitForFinished(60000);
++            const QString out = QString::fromUtf8(process.readAllStandardOutput()).left(600).replace(QLatin1Char('\n'), QLatin1Char('|'));
++            QString err = QString::fromUtf8(process.readAllStandardError());
++            err = err.right(700).replace(QLatin1Char('\n'), QLatin1Char('|'));
++            qWarning() << "SELFTEST exec" << program << "started" << started << "finished" << finished << "exit" << process.exitCode() << "status"
++                       << process.exitStatus() << "error" << process.errorString() << "OUT" << out << "ERR" << err;
++            continue;
++        }
++        if (line.startsWith(QLatin1String("meta:"))) {
++            const QString id = line.mid(5).trimmed();
++            Mlt::Repository *repo = Mlt::Factory::init();
++            const QByteArray idBytes = id.toUtf8();
++            bool inList = false;
++            std::unique_ptr<Mlt::Properties> filterList(repo->filters());
++            for (int i = 0; filterList && i < filterList->count(); ++i) {
++                if (idBytes == filterList->get_name(i)) {
++                    inList = true;
++                }
++            }
++            std::unique_ptr<Mlt::Properties> md(repo->metadata(mlt_service_filter_type, idBytes.constData()));
++            qWarning() << "SELFTEST meta" << id << "inFilterList" << inList << "metadata" << (md && md->is_valid())
++                       << "title" << (md && md->is_valid() ? md->get("title") : "-") << "identifier" << (md && md->is_valid() ? md->get("identifier") : "-")
++                       << "version" << (md && md->is_valid() ? md->get("version") : "-");
++            continue;
++        }
++        if (!line.startsWith(QLatin1String("av:"))) {
++            mltFilters << line;
++            continue;
++        }
++        const QString name = line.mid(3).trimmed();
++        const AVFilter *f = getByName ? getByName(name.toUtf8().constData()) : nullptr;
++        if (!f) {
++            qWarning() << "SELFTEST av" << name << "NOT IN libavfilter";
++            continue;
++        }
++        qWarning() << "SELFTEST av" << name << "in" << padCount(f, 0) << "out" << padCount(f, 1) << "inputs ptr" << (const void *) f->inputs << "outputs ptr"
++                   << (const void *) f->outputs << "flags" << f->flags
++                   << "type_in" << (f->inputs ? padType(f->inputs, 0) : -9) << "type_out" << (f->outputs ? padType(f->outputs, 0) : -9);
++    }
++    auto render = [&](const QString &name, const QString &filter) {
++        Mlt::Profile profile(QStringLiteral("atsc_1080p_30").toUtf8().constData());
++        Mlt::Producer producer(profile, "frei0r.test_pat_B");
++        if (!producer.is_valid()) {
++            producer = Mlt::Producer(profile, "color:#3060c0");
++        }
++        QString status = QStringLiteral("producer=%1").arg(producer.is_valid());
++        if (!filter.isEmpty()) {
++            Mlt::Filter f(profile, filter.toUtf8().constData());
++            status += QStringLiteral(" filter(%1)=%2").arg(filter).arg(f.is_valid());
++            if (f.is_valid()) {
++                producer.attach(f);
++            }
++        }
++        const QString out = dir + name + QStringLiteral(".png");
++        QFile::remove(out);
++        Mlt::Consumer consumer(profile, "avformat", out.toUtf8().constData());
++        consumer.set("vcodec", "png");
++        consumer.set("f", "image2");
++        consumer.set("frames", 1);
++        consumer.set("real_time", -1);
++        consumer.set("terminate_on_pause", 1);
++        consumer.connect(producer);
++        producer.seek(5);
++        consumer.run();
++        status += QStringLiteral(" file=%1").arg(QFileInfo::exists(out) ? QFileInfo(out).size() : -1);
++        qWarning() << "SELFTEST" << name << status;
++    };
++    render(QStringLiteral("selftest_plain"), QString());
++    for (const QString &filter : mltFilters) {
++        render(QStringLiteral("selftest_") + QString(filter.trimmed()).replace(QLatin1Char('.'), QLatin1Char('_')), filter.trimmed());
++    }
++}
+diff --git a/src/android/androidrender.h b/src/android/androidrender.h
+new file mode 100644
+index 0000000..9276afd
+--- /dev/null
++++ b/src/android/androidrender.h
+@@ -0,0 +1,41 @@
++/*
++    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#pragma once
++
++#include <QtGlobal>
++
++#ifdef Q_OS_ANDROID
++/** @brief Developer check: when <external files>/selftest.txt exists, render a test pattern with the filters listed in it
++ *  (one MLT service per line, e.g. frei0r.invert0r) to PNG files next to it. */
++void androidDevSelfTest();
++#include <QObject>
++#include <QString>
++#include <atomic>
++
++/** @brief Renders a Kdenlive playlist (MLT XML with an embedded consumer) inside the app process.
++ *  Android cannot run the separate melt / kdenlive_render programs, so this replaces them.
++ *  Signals use the same meaning as the render server messages. */
++class AndroidRender : public QObject
++{
++    Q_OBJECT
++public:
++    static AndroidRender *instance();
++    /** @brief Start rendering @param playlist in a worker thread. */
++    void start(const QString &playlist);
++    /** @brief Abort the job writing @param url (the output file). */
++    void abort(const QString &url);
++    void abortAll();
++
++Q_SIGNALS:
++    void progress(const QString &url, int percent, int frame);
++    void finished(const QString &url, int status, const QString &error);
++
++private:
++    explicit AndroidRender(QObject *parent = nullptr);
++    void run(const QString &playlist);
++    std::atomic<bool> m_abort{false};
++    QString m_runningUrl;
++};
++#endif
+diff --git a/src/android/androidsetup.cpp b/src/android/androidsetup.cpp
+new file mode 100644
+index 0000000..8e901f6
+--- /dev/null
++++ b/src/android/androidsetup.cpp
+@@ -0,0 +1,398 @@
++/*
++    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#include "androidsetup.h"
++
++#include "core.h"
++#include "doc/kdenlivedoc.h"
++#include "kdenlivesettings.h"
++#include "project/projectmanager.h"
++
++#include <QGuiApplication>
++
++#include <QCoreApplication>
++#include <QDebug>
++#include <QDir>
++#include <QDirIterator>
++#include <QFileInfo>
++#include <QFile>
++#include <QJniEnvironment>
++#include <QJniObject>
++#include <QIcon>
++#include <QMimeDatabase>
++#include <QResource>
++#include <dlfcn.h>
++#include <unistd.h>
++#include <QStandardPaths>
++#include <QUrl>
++
++static void copyAssetDir(const QString &src, const QString &dst)
++{
++    QDir().mkpath(dst);
++    const QString prefix = src + QLatin1Char('/');
++    QDirIterator it(src, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
++    while (it.hasNext()) {
++        const QString path = it.next();
++        const QString target = dst + QLatin1Char('/') + path.mid(prefix.length());
++        if (it.fileInfo().isDir()) {
++            QDir().mkpath(target);
++        } else {
++            QDir().mkpath(QFileInfo(target).absolutePath());
++            QFile::remove(target);
++            if (!QFile::copy(path, target)) {
++                qWarning() << "Android: failed to copy asset" << path << "to" << target;
++            } else {
++                QFile::setPermissions(target, QFile::permissions(target) | QFileDevice::WriteOwner);
++            }
++        }
++    }
++}
++
++QString androidNativeLibDir()
++{
++    return QString::fromUtf8(qgetenv("KDENLIVE_NATIVE_LIB_DIR"));
++}
++
++void androidPrepareData()
++{
++    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
++    QString nativeDir;
++    qint64 updateTime = 0;
++    if (ctx.isValid()) {
++        QJniObject appInfo = ctx.callObjectMethod("getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
++        nativeDir = appInfo.getObjectField<jstring>("nativeLibraryDir").toString();
++        QJniObject pm = ctx.callObjectMethod("getPackageManager", "()Landroid/content/pm/PackageManager;");
++        QJniObject pkg = ctx.callObjectMethod("getPackageName", "()Ljava/lang/String;");
++        QJniObject pi = pm.callObjectMethod("getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;", pkg.object<jstring>(), 0);
++        updateTime = pi.getField<jlong>("lastUpdateTime");
++    }
++    const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
++    QDir().mkpath(base);
++
++    const QString marker = base + QStringLiteral("/.assets-version");
++    QString current;
++    QFile mf(marker);
++    if (mf.open(QIODevice::ReadOnly)) {
++        current = QString::fromUtf8(mf.readAll()).trimmed();
++        mf.close();
++    }
++    const QString wanted = QString::number(updateTime);
++    if (current != wanted) {
++        qDebug() << "Android: installing bundled data to" << base;
++        copyAssetDir(QStringLiteral("assets:/mlt"), base + QStringLiteral("/mlt"));
++        copyAssetDir(QStringLiteral("assets:/kdenlive"), base);
++        copyAssetDir(QStringLiteral("assets:/icons"), base + QStringLiteral("/icons"));
++        if (mf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++            mf.write(wanted.toUtf8());
++            mf.close();
++        }
++    }
++
++    // Breeze icon theme, bundled as a Qt resource file
++    if (QResource::registerResource(base + QStringLiteral("/icons/breeze-icons.rcc"))) {
++        QIcon::setThemeSearchPaths(QStringList{QStringLiteral(":/icons")} + QIcon::themeSearchPaths());
++        QIcon::setThemeName(QStringLiteral("breeze-dark"));
++        QIcon::setFallbackThemeName(QStringLiteral("breeze-dark"));
++    } else {
++        qWarning() << "Android: could not register the icon theme";
++    }
++    // (MLT is patched to only try libmlt*.so modules in the native library directory)
++    qputenv("MLT_REPOSITORY", nativeDir.toUtf8());
++    qputenv("KDENLIVE_NATIVE_LIB_DIR", nativeDir.toUtf8());
++    qputenv("MLT_DATA", (base + QStringLiteral("/mlt")).toUtf8());
++    qputenv("MLT_PROFILES_PATH", (base + QStringLiteral("/mlt/profiles")).toUtf8());
++    qputenv("FREI0R_PATH", nativeDir.toUtf8());
++    qputenv("LADSPA_PATH", nativeDir.toUtf8());
++    qDebug() << "Android: native lib dir" << nativeDir << "data dir" << base;
++}
++
++static const char *const s_mediaPermissions[] = {"android.permission.READ_MEDIA_VIDEO",
++                                                 "android.permission.READ_MEDIA_IMAGES",
++                                                 "android.permission.READ_MEDIA_AUDIO",
++                                                 "android.permission.POST_NOTIFICATIONS"};
++
++static bool androidHasPermission(const QJniObject &ctx, const char *permission)
++{
++    return ctx.callMethod<jint>("checkSelfPermission", "(Ljava/lang/String;)I", QJniObject::fromString(QLatin1String(permission)).object<jstring>()) == 0;
++}
++
++void androidRequestMediaPermissions()
++{
++    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
++    if (!ctx.isValid()) {
++        return;
++    }
++    QStringList missing;
++    for (const char *permission : s_mediaPermissions) {
++        if (!androidHasPermission(ctx, permission)) {
++            missing << QLatin1String(permission);
++        }
++    }
++    if (missing.isEmpty()) {
++        return;
++    }
++    QNativeInterface::QAndroidApplication::runOnAndroidMainThread([ctx, missing]() {
++        QJniEnvironment env;
++        jclass stringClass = env->FindClass("java/lang/String");
++        jobjectArray array = env->NewObjectArray(missing.size(), stringClass, nullptr);
++        for (int i = 0; i < missing.size(); ++i) {
++            env->SetObjectArrayElement(array, i, QJniObject::fromString(missing.at(i)).object<jstring>());
++        }
++        QJniObject activity = ctx;
++        activity.callMethod<void>("requestPermissions", "([Ljava/lang/String;I)V", array, 7001);
++        env->DeleteLocalRef(array);
++        env->DeleteLocalRef(stringClass);
++    });
++}
++
++/** Returns the real file path behind a document picked with the system picker, if the app can read it directly. */
++static QString androidContentToLocalPath(const QUrl &url)
++{
++    const QString authority = url.authority();
++    const QString docPath = QUrl::fromPercentEncoding(url.path().toUtf8()); // "/document/video:1000012179"
++    QString candidate;
++    QString mediaUri;
++    if (authority == QLatin1String("com.android.externalstorage.documents")) {
++        const QString id = docPath.section(QLatin1Char('/'), 2);
++        if (id.startsWith(QLatin1String("primary:"))) {
++            candidate = QStringLiteral("/storage/emulated/0/") + id.mid(8);
++        }
++    } else if (authority == QLatin1String("com.android.providers.media.documents")) {
++        const QString id = docPath.section(QLatin1Char('/'), 2);
++        const QString type = id.section(QLatin1Char(':'), 0, 0);
++        const QString number = id.section(QLatin1Char(':'), 1);
++        if (type == QLatin1String("video") || type == QLatin1String("audio") || type == QLatin1String("image")) {
++            mediaUri = QStringLiteral("content://media/external/%1/media/%2").arg(type, number);
++        }
++    } else if (authority == QLatin1String("media")) {
++        mediaUri = url.toString();
++    }
++
++    if (!mediaUri.isEmpty()) {
++        QJniObject ctx = QNativeInterface::QAndroidApplication::context();
++        QJniObject resolver = ctx.callObjectMethod("getContentResolver", "()Landroid/content/ContentResolver;");
++        QJniObject uri = QJniObject::callStaticObjectMethod("android/net/Uri",
++                                                            "parse",
++                                                            "(Ljava/lang/String;)Landroid/net/Uri;",
++                                                            QJniObject::fromString(mediaUri).object<jstring>());
++        QJniEnvironment env;
++        jclass stringClass = env->FindClass("java/lang/String");
++        jobjectArray projection = env->NewObjectArray(1, stringClass, nullptr);
++        env->SetObjectArrayElement(projection, 0, QJniObject::fromString(QStringLiteral("_data")).object<jstring>());
++        QJniObject cursor = resolver.callObjectMethod("query",
++                                                      "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
++                                                      uri.object(),
++                                                      projection,
++                                                      nullptr,
++                                                      nullptr,
++                                                      nullptr);
++        env->DeleteLocalRef(projection);
++        env->DeleteLocalRef(stringClass);
++        if (cursor.isValid()) {
++            if (cursor.callMethod<jboolean>("moveToFirst")) {
++                candidate = cursor.callObjectMethod("getString", "(I)Ljava/lang/String;", 0).toString();
++            }
++            cursor.callMethod<void>("close");
++        }
++    }
++    if (!candidate.isEmpty() && QFileInfo(candidate).isReadable()) {
++        return candidate;
++    }
++    return {};
++}
++
++QList<QUrl> androidImportUrls(const QList<QUrl> &urls, const QString &subdir)
++{
++    QList<QUrl> result;
++    const QString mediaDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QLatin1Char('/') + subdir;
++    for (const QUrl &url : urls) {
++        if (url.scheme() != QLatin1String("content")) {
++            result << url;
++            continue;
++        }
++        if (subdir == QLatin1String("media")) {
++            // use the original file in place when the app is allowed to read it (no copy)
++            const QString direct = androidContentToLocalPath(url);
++            if (!direct.isEmpty()) {
++                qDebug() << "Android: using" << url << "in place as" << direct;
++                result << QUrl::fromLocalFile(direct);
++                continue;
++            }
++            androidRequestMediaPermissions();
++        }
++        QDir().mkpath(mediaDir);
++        QFile src(url.toString());
++        QString name = QFileInfo(url.toString()).fileName();
++        if (name.isEmpty()) {
++            name = url.fileName();
++        }
++        if (name.isEmpty()) {
++            name = QStringLiteral("imported");
++        }
++        QString dest = mediaDir + QLatin1Char('/') + name;
++        // avoid overwriting a different file that has the same name
++        const qint64 size = src.size();
++        const QFileInfo base(name);
++        int n = 1;
++        while (QFileInfo::exists(dest) && QFileInfo(dest).size() != size) {
++            dest = mediaDir + QLatin1Char('/') + base.completeBaseName() + QStringLiteral("_%1.").arg(n++) + base.suffix();
++        }
++        if (!QFileInfo::exists(dest)) {
++            if (!src.copy(dest)) {
++                qWarning() << "Android: could not import" << url << ":" << src.errorString();
++                continue;
++            }
++        }
++        qDebug() << "Android: imported" << url << "->" << dest;
++        result << QUrl::fromLocalFile(dest);
++    }
++    return result;
++}
++
++void androidInitFFmpeg()
++{
++    void *lib = dlopen("libavcodec.so", RTLD_NOW);
++    if (!lib) {
++        qWarning() << "Android: libavcodec not found:" << dlerror();
++        return;
++    }
++    using SetJavaVm = int (*)(void *, void *);
++    auto setJavaVm = reinterpret_cast<SetJavaVm>(dlsym(lib, "av_jni_set_java_vm"));
++    if (setJavaVm) {
++        const int r = setJavaVm(QJniEnvironment::javaVM(), nullptr);
++        qDebug() << "Android: av_jni_set_java_vm returned" << r;
++    } else {
++        qWarning() << "Android: av_jni_set_java_vm not available";
++    }
++}
++
++QString androidPublishVideo(const QString &path)
++{
++    QFileInfo info(path);
++    if (!info.exists()) {
++        return {};
++    }
++    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
++    if (!ctx.isValid()) {
++        return {};
++    }
++    QString mime = QMimeDatabase().mimeTypeForFile(info).name();
++    if (!mime.startsWith(QLatin1String("video/")) && !mime.startsWith(QLatin1String("audio/"))) {
++        mime = QStringLiteral("video/mp4");
++    }
++    const bool isAudio = mime.startsWith(QLatin1String("audio/"));
++
++    QJniObject resolver = ctx.callObjectMethod("getContentResolver", "()Landroid/content/ContentResolver;");
++    QJniObject values("android/content/ContentValues");
++    auto put = [&values](const char *key, const QString &value) {
++        values.callMethod<void>("put",
++                                "(Ljava/lang/String;Ljava/lang/String;)V",
++                                QJniObject::fromString(QLatin1String(key)).object<jstring>(),
++                                QJniObject::fromString(value).object<jstring>());
++    };
++    put("_display_name", info.fileName());
++    put("mime_type", mime);
++    put("relative_path", isAudio ? QStringLiteral("Music/Kdenlive") : QStringLiteral("Movies/Kdenlive"));
++
++    QJniObject collection = QJniObject::callStaticObjectMethod(isAudio ? "android/provider/MediaStore$Audio$Media" : "android/provider/MediaStore$Video$Media",
++                                                               "getContentUri",
++                                                               "(Ljava/lang/String;)Landroid/net/Uri;",
++                                                               QJniObject::fromString(QStringLiteral("external_primary")).object<jstring>());
++    QJniObject uri = resolver.callObjectMethod("insert",
++                                               "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
++                                               collection.object(),
++                                               values.object());
++    if (!uri.isValid()) {
++        qWarning() << "Android: MediaStore insert failed for" << path;
++        return {};
++    }
++    const QString uriString = uri.toString();
++    QFile src(path);
++    if (!src.open(QIODevice::ReadOnly)) {
++        qWarning() << "Android: cannot read" << path << src.errorString();
++        return {};
++    }
++    // QFile cannot write to content:// URIs: write through a file descriptor from the content resolver
++    QJniObject pfd = resolver.callObjectMethod("openFileDescriptor",
++                                               "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
++                                               uri.object(),
++                                               QJniObject::fromString(QStringLiteral("w")).object<jstring>());
++    if (!pfd.isValid()) {
++        qWarning() << "Android: cannot open output descriptor for" << uriString;
++        return {};
++    }
++    const int fd = pfd.callMethod<jint>("detachFd");
++    QByteArray buffer(1 << 20, Qt::Uninitialized);
++    bool ok = true;
++    while (ok) {
++        const qint64 n = src.read(buffer.data(), buffer.size());
++        if (n <= 0) {
++            break;
++        }
++        qint64 written = 0;
++        while (written < n) {
++            const ssize_t w = ::write(fd, buffer.constData() + written, n - written);
++            if (w <= 0) {
++                ok = false;
++                break;
++            }
++            written += w;
++        }
++    }
++    ::close(fd);
++    if (!ok) {
++        qWarning() << "Android: write error while publishing" << path;
++        return {};
++    }
++    qDebug() << "Android: published" << path << "as" << uriString;
++    return uriString;
++}
++
++void androidInstallLifecycleHooks()
++{
++    // Android ends background apps without warning: save as soon as the activity is stopped.
++    QObject::connect(qApp, &QGuiApplication::applicationStateChanged, qApp, [](Qt::ApplicationState state) {
++        if (state != Qt::ApplicationSuspended && state != Qt::ApplicationHidden) {
++            return;
++        }
++        if (pCore && pCore->currentDoc() && pCore->currentDoc()->isModified() && pCore->projectManager()) {
++            qDebug() << "Android: app went to the background, saving the project";
++            pCore->projectManager()->saveFile();
++        }
++    });
++}
++
++static QJniObject androidContext()
++{
++    return QNativeInterface::QAndroidApplication::context();
++}
++
++void androidRenderServiceStart(const QString &title)
++{
++    QJniObject ctx = androidContext();
++    QJniObject::callStaticMethod<void>("org/kdenlive/android/RenderService", "start", "(Landroid/content/Context;Ljava/lang/String;)V", ctx.object(),
++                                       QJniObject::fromString(title).object<jstring>());
++}
++
++void androidRenderServiceProgress(const QString &title, int percent)
++{
++    QJniObject ctx = androidContext();
++    QJniObject::callStaticMethod<void>("org/kdenlive/android/RenderService", "update", "(Landroid/content/Context;Ljava/lang/String;I)V", ctx.object(),
++                                       QJniObject::fromString(title).object<jstring>(), jint(percent));
++}
++
++void androidRenderServiceStop()
++{
++    QJniObject ctx = androidContext();
++    QJniObject::callStaticMethod<void>("org/kdenlive/android/RenderService", "stop", "(Landroid/content/Context;)V", ctx.object());
++}
++
++void androidRenderServiceFinished(const QString &contentUri, const QString &title, bool ok, const QString &message)
++{
++    QJniObject ctx = androidContext();
++    QJniObject::callStaticMethod<void>("org/kdenlive/android/RenderService", "finished",
++                                       "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;)V", ctx.object(),
++                                       QJniObject::fromString(contentUri).object<jstring>(), QJniObject::fromString(title).object<jstring>(), jboolean(ok),
++                                       QJniObject::fromString(message).object<jstring>());
++}
+diff --git a/src/android/androidsetup.h b/src/android/androidsetup.h
+new file mode 100644
+index 0000000..40d1371
+--- /dev/null
++++ b/src/android/androidsetup.h
+@@ -0,0 +1,43 @@
++/*
++    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#pragma once
++
++#include <QtGlobal>
++
++#ifdef Q_OS_ANDROID
++#include <QList>
++#include <QString>
++#include <QUrl>
++
++/** @brief Copies content:// documents (from the Android document picker) into the app media folder and
++ *  returns local file URLs; other URLs are returned unchanged. */
++QList<QUrl> androidImportUrls(const QList<QUrl> &urls, const QString &subdir = QStringLiteral("media"));
++
++/** @brief Gives FFmpeg the JavaVM so that its MediaCodec (hardware) encoders and decoders work. Call after MLT is initialised. */
++void androidInitFFmpeg();
++
++/** @brief Copies a rendered video into the shared Movies/Kdenlive folder (MediaStore) so that gallery apps see it.
++ *  Returns the content:// URI of the published file, or an empty string on failure. */
++QString androidPublishVideo(const QString &path);
++
++/** @brief Asks for read access to shared photos, videos and audio (needed to use picked files in place). */
++void androidRequestMediaPermissions();
++
++/** @brief Saves the project when the app goes to the background (Android may kill it at any time). */
++void androidInstallLifecycleHooks();
++
++/** @brief Foreground render service + notifications (keeps rendering alive in the background, "finished" notification with Play/Share). */
++void androidRenderServiceStart(const QString &title);
++void androidRenderServiceProgress(const QString &title, int percent);
++void androidRenderServiceStop();
++void androidRenderServiceFinished(const QString &contentUri, const QString &title, bool ok, const QString &message);
++
++/** @brief Copies data bundled in the APK assets (MLT data, Kdenlive data) to the app files dir
++ *  and sets the MLT_* / FREI0R_PATH environment variables. Must run before MLT is initialised. */
++void androidPrepareData();
++
++/** @brief Directory with the native libraries; helper programs (libmelt.so, libffmpeg.so, libffprobe.so) are executables in there. */
++QString androidNativeLibDir();
++#endif
+diff --git a/src/android/androidui.cpp b/src/android/androidui.cpp
+new file mode 100644
+index 0000000..2a7746e
+--- /dev/null
++++ b/src/android/androidui.cpp
+@@ -0,0 +1,198 @@
++/*
++    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#include "androidui.h"
++
++#include <QAbstractSpinBox>
++#include <QApplication>
++#include <QLineEdit>
++#include <QPlainTextEdit>
++#include <QTextEdit>
++#include <QDialog>
++#include <QJniObject>
++#include <QDebug>
++#include <QGuiApplication>
++#include <QInputMethod>
++#include <QFile>
++#include <QContextMenuEvent>
++#include <QMouseEvent>
++#include <QPointer>
++#include <QTimer>
++#include <QWidget>
++#include <QWindow>
++
++namespace
++{
++// Breeze "highlight" blue: visible on both the dark and the light parts of the UI
++constexpr const char *s_borderColor = "#3daee9";
++
++class AndroidUiHelper : public QObject
++{
++public:
++    explicit AndroidUiHelper(QObject *parent)
++        : QObject(parent)
++    {
++        // Qt for Android drops mouse input for dialog windows: tell KdenliveActivity to convert mouse events to touch while one is open
++        m_dialogTimer.setInterval(120);
++        connect(&m_dialogTimer, &QTimer::timeout, this, [this]() {
++            bool dialogOpen = false;
++            const QWidgetList tops = QApplication::topLevelWidgets();
++            for (QWidget *w : tops) {
++                if (w->isVisible() && qobject_cast<QDialog *>(w)) {
++                    dialogOpen = true;
++                    break;
++                }
++            }
++            if (dialogOpen != m_dialogOpen) {
++                m_dialogOpen = dialogOpen;
++                QJniObject::setStaticField<jboolean>("org/kdenlive/android/KdenliveActivity", "mouseAsTouch", jboolean(dialogOpen));
++            }
++        });
++        m_dialogTimer.start();
++        m_longPressTimer.setSingleShot(true);
++        m_longPressTimer.setInterval(600);
++        connect(&m_longPressTimer, &QTimer::timeout, this, &AndroidUiHelper::longPress);
++    }
++
++    bool eventFilter(QObject *obj, QEvent *event) override
++    {
++        switch (event->type()) {
++        case QEvent::Show:
++            if (auto *w = qobject_cast<QWidget *>(obj)) {
++                decorate(w);
++            }
++            break;
++        case QEvent::FocusIn:
++            // The Android keyboard's predictive text keeps an in-progress word (composing region) that Qt's validators / spin boxes / rich text
++            // editors reject or rewrite: text then gets deleted irreversibly and typing stops working. Ask the keyboard for plain key input.
++            if (auto *w = qobject_cast<QWidget *>(obj)) {
++                if (qobject_cast<QLineEdit *>(w) || qobject_cast<QAbstractSpinBox *>(w) || qobject_cast<QTextEdit *>(w) || qobject_cast<QPlainTextEdit *>(w)) {
++                    const Qt::InputMethodHints wanted = Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase;
++                    if ((w->inputMethodHints() & wanted) != wanted) {
++                        w->setInputMethodHints(w->inputMethodHints() | wanted);
++                        QGuiApplication::inputMethod()->update(Qt::ImHints);
++                    }
++                }
++            }
++            break;
++        case QEvent::MouseButtonPress:
++        case QEvent::MouseMove:
++        case QEvent::MouseButtonRelease:
++            logMouse(obj, static_cast<QMouseEvent *>(event));
++            return handleMouse(obj, static_cast<QMouseEvent *>(event));
++        default:
++            break;
++        }
++        return false;
++    }
++
++private:
++    /** Border for every top-level popup/dialog (not the main window) */
++    void decorate(QWidget *w)
++    {
++        if (!w->isWindow() || w->property("androidBorder").toBool()) {
++            return;
++        }
++        const Qt::WindowType type = w->windowType();
++        if (type != Qt::Dialog && type != Qt::Popup && type != Qt::Tool && type != Qt::Sheet && type != Qt::Drawer) {
++            return;
++        }
++        w->setProperty("androidBorder", true);
++        if (w->objectName().isEmpty()) {
++            w->setObjectName(QStringLiteral("androidWindow%1").arg(quintptr(w), 0, 16));
++        }
++        w->setStyleSheet(w->styleSheet() + QStringLiteral("\n#%1 { border: 2px solid %2; }").arg(w->objectName(), QLatin1String(s_borderColor)));
++    }
++
++    /** Developer aid for automated mouse tests: when <external files>/mouselog.txt exists, log real mouse events
++     *  (device pixel coordinates) so that a script can steer a virtual mouse precisely. */
++    void logMouse(QObject *obj, QMouseEvent *me)
++    {
++        static const bool enabled = QFile::exists(QStringLiteral("/storage/emulated/0/Android/data/org.qtproject.example.kdenlive/files/mouselog.txt"));
++        if (!enabled || me->source() != Qt::MouseEventNotSynthesized || !qobject_cast<QWidget *>(obj)) {
++            return;
++        }
++        static QPointF last;
++        const QPointF g = me->globalPosition() * qApp->devicePixelRatio();
++        if (me->type() == QEvent::MouseMove && (g - last).manhattanLength() < 0.5) {
++            return;
++        }
++        last = g;
++        qWarning().nospace() << "MOUSEPOS " << int(me->type()) << " " << qRound(g.x()) << " " << qRound(g.y()) << " b" << int(me->button()) << " B" << int(me->buttons())
++                             << " " << obj->metaObject()->className();
++    }
++
++    /** Long press (finger down 600 ms without moving) = right click.
++     *  Touch is delivered to widgets as synthesized left mouse events. */
++    bool handleMouse(QObject *obj, QMouseEvent *me)
++    {
++        const bool synthesized = me->source() != Qt::MouseEventNotSynthesized;
++        if (!synthesized) {
++            return false;
++        }
++        auto *widget = qobject_cast<QWidget *>(obj);
++        if (!widget) {
++            return false;
++        }
++        switch (me->type()) {
++        case QEvent::MouseButtonPress:
++            if (me->button() == Qt::LeftButton && me->buttons() == Qt::LeftButton) {
++                m_target = widget;
++                m_pressGlobal = me->globalPosition();
++                m_pressLocal = me->position();
++                m_fired = false;
++                m_longPressTimer.start();
++            }
++            break;
++        case QEvent::MouseMove:
++            if (m_longPressTimer.isActive() && (me->globalPosition() - m_pressGlobal).manhattanLength() > 24) {
++                m_longPressTimer.stop();
++            }
++            break;
++        case QEvent::MouseButtonRelease:
++            m_longPressTimer.stop();
++            if (m_fired) {
++                m_fired = false;
++                return true; // the right click was already sent, swallow the real release
++            }
++            break;
++        default:
++            break;
++        }
++        return false;
++    }
++
++    void longPress()
++    {
++        QWidget *target = m_target;
++        if (!target) {
++            return;
++        }
++        m_fired = true;
++        // cancel the left press (so no drag/selection continues), then send a right click
++        QMouseEvent leftRelease(QEvent::MouseButtonRelease, m_pressLocal, m_pressGlobal, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
++        QMouseEvent rightPress(QEvent::MouseButtonPress, m_pressLocal, m_pressGlobal, Qt::RightButton, Qt::RightButton, Qt::NoModifier);
++        QMouseEvent rightRelease(QEvent::MouseButtonRelease, m_pressLocal, m_pressGlobal, Qt::RightButton, Qt::NoButton, Qt::NoModifier);
++        QContextMenuEvent context(QContextMenuEvent::Mouse, m_pressLocal.toPoint(), m_pressGlobal.toPoint());
++        QApplication::sendEvent(target, &leftRelease);
++        QApplication::sendEvent(target, &rightPress);
++        QApplication::sendEvent(target, &rightRelease);
++        QApplication::sendEvent(target, &context);
++    }
++
++    QTimer m_longPressTimer;
++    QTimer m_dialogTimer;
++    bool m_dialogOpen = false;
++    QPointer<QWidget> m_target;
++    QPointF m_pressGlobal;
++    QPointF m_pressLocal;
++    bool m_fired = false;
++};
++} // namespace
++
++void androidInstallUiHelpers()
++{
++    static AndroidUiHelper *helper = new AndroidUiHelper(qApp);
++    qApp->installEventFilter(helper);
++}
+diff --git a/src/android/androidui.h b/src/android/androidui.h
+new file mode 100644
+index 0000000..fd3ffc8
+--- /dev/null
++++ b/src/android/androidui.h
+@@ -0,0 +1,15 @@
++/*
++    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#pragma once
++
++#include <QtGlobal>
++
++#ifdef Q_OS_ANDROID
++/** @brief Installs Android-specific UI helpers on the running QApplication:
++ *  - a high-contrast border around dialogs, menus and popups, so they stand out from the window below
++ *  - basic touch fallbacks for mouse use (long press = right click)
++ *  See ANDROID-TODO.md for what is still missing for real touch support. */
++void androidInstallUiHelpers();
++#endif
+diff --git a/src/android/knsstubs.h b/src/android/knsstubs.h
+new file mode 100644
+index 0000000..e370a16
+--- /dev/null
++++ b/src/android/knsstubs.h
+@@ -0,0 +1,40 @@
++/*
++    SPDX-License-Identifier: GPL-2.0-or-later
++
++    Minimal stand-ins for KNewStuff types, used only when KNewStuff is not
++    available (Android). The generated .ui code still references
++    KNSWidgets::Button, so it is provided here as a permanently hidden widget.
++*/
++
++#pragma once
++
++#include <QList>
++#include <QPushButton>
++#include <QString>
++#include <QStringList>
++
++namespace KNSCore {
++class Entry
++{
++public:
++    enum class Status { Invalid, Downloadable, Installed, Updateable, Deleted, Installing, Updating };
++    Status status() const { return Status::Invalid; }
++    QStringList installedFiles() const { return {}; }
++};
++} // namespace KNSCore
++
++namespace KNSWidgets {
++class Button : public QPushButton
++{
++    Q_OBJECT
++public:
++    explicit Button(QWidget *parent = nullptr)
++        : QPushButton(parent)
++    {
++        hide();
++    }
++    void setConfigFile(const QString &) {}
++Q_SIGNALS:
++    void dialogFinished(const QList<KNSCore::Entry> &changedEntries);
++};
++} // namespace KNSWidgets
+diff --git a/src/android/stubs/KNSCore/Entry b/src/android/stubs/KNSCore/Entry
+new file mode 100644
+index 0000000..7a17921
+--- /dev/null
++++ b/src/android/stubs/KNSCore/Entry
+@@ -0,0 +1 @@
++#include "android/knsstubs.h"
+diff --git a/src/android/stubs/KNSWidgets/Button b/src/android/stubs/KNSWidgets/Button
+new file mode 100644
+index 0000000..7a17921
+--- /dev/null
++++ b/src/android/stubs/KNSWidgets/Button
+@@ -0,0 +1 @@
++#include "android/knsstubs.h"
+diff --git a/src/assets/assetlist/view/assetlistwidget.cpp b/src/assets/assetlist/view/assetlistwidget.cpp
+index 47c0f03..41bf69c 100644
+--- a/src/assets/assetlist/view/assetlistwidget.cpp
++++ b/src/assets/assetlist/view/assetlistwidget.cpp
+@@ -13,8 +13,10 @@
+ #include <KAboutData>
+ #include <KMessageBox>
+ #include <KMessageWidget>
++#ifndef KDENLIVE_NO_NEWSTUFF
+ #include <KNSCore/Entry>
+ #include <KNSWidgets/Action>
++#endif
+ #include <KStandardAction>
+ #include <QAction>
+ #include <QActionGroup>
+@@ -257,6 +259,7 @@ AssetListWidget::AssetListWidget(bool isEffect, QAction *includeList, QAction *t
+         m_proxyModel->updateIncludeList();
+     });
+ 
++#ifndef KDENLIVE_NO_NEWSTUFF
+     if (m_isEffect) {
+         KNSWidgets::Action *downloadAction = new KNSWidgets::Action(i18n("Download New Effects..."), QStringLiteral(":data/kdenlive_effects.knsrc"), this);
+         m_toolbar->addAction(downloadAction);
+@@ -288,6 +291,7 @@ AssetListWidget::AssetListWidget(bool isEffect, QAction *includeList, QAction *t
+             }
+         });
+     }
++#endif
+ 
+     m_toolbar->addWidget(m_filterButton);
+ 
+diff --git a/src/bin/bin.cpp b/src/bin/bin.cpp
+index 80cc22d..d1e7e2b 100644
+--- a/src/bin/bin.cpp
++++ b/src/bin/bin.cpp
+@@ -11,6 +11,9 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include "bincommands.h"
+ #include "clipcreator.hpp"
+ #include "core.h"
++#ifdef Q_OS_ANDROID
++#include "android/androidsetup.h"
++#endif
+ #include "dialogs/clipcreationdialog.h"
+ #include "dialogs/clipjobmanager.h"
+ #include "dialogs/settings/kdenlivesettingsdialog.h"
+@@ -4967,8 +4970,13 @@ void Bin::doMoveFolder(const QString &id, const QString &newParentId)
+     currentItem->changeParent(newParent);
+ }
+ 
+-void Bin::droppedUrls(const QList<QUrl> &urls, const QString &folderInfo)
++void Bin::droppedUrls(const QList<QUrl> &urlsIn, const QString &folderInfo)
+ {
++#ifdef Q_OS_ANDROID
++    const QList<QUrl> urls = androidImportUrls(urlsIn);
++#else
++    const QList<QUrl> &urls = urlsIn;
++#endif
+     QModelIndex current;
+     if (folderInfo.isEmpty()) {
+         current = m_proxyModel->mapToSource(m_proxyModel->selectionModel()->currentIndex());
+diff --git a/src/bin/mediabrowser.cpp b/src/bin/mediabrowser.cpp
+index f072ea8..289ec20 100644
+--- a/src/bin/mediabrowser.cpp
++++ b/src/bin/mediabrowser.cpp
+@@ -6,6 +6,59 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ */
+ 
+ #include "mediabrowser.h"
++
++#ifdef KDENLIVE_NO_KIOFILEWIDGETS
++#include "bin.h"
++#include "core.h"
++
++#include <KLocalizedString>
++#include <QFileDialog>
++#include <QIcon>
++#include <QLabel>
++#include <QPushButton>
++#include <QVBoxLayout>
++
++MediaBrowser::MediaBrowser(QWidget *parent)
++    : QWidget(parent)
++{
++    auto *lay = new QVBoxLayout(this);
++    auto *label = new QLabel(i18n("Pick video, audio and images from this device with the system file picker."), this);
++    label->setWordWrap(true);
++    auto *button = new QPushButton(QIcon::fromTheme(QStringLiteral("document-open")), i18n("Add media from device…"), this);
++    connect(button, &QPushButton::clicked, this, &MediaBrowser::importSelection);
++    lay->addWidget(label);
++    lay->addWidget(button);
++    lay->addStretch();
++}
++
++MediaBrowser::~MediaBrowser() = default;
++
++const QUrl MediaBrowser::url() const
++{
++    return m_url;
++}
++
++void MediaBrowser::setUrl(const QUrl url)
++{
++    m_url = url;
++}
++
++void MediaBrowser::back() {}
++
++void MediaBrowser::forward() {}
++
++void MediaBrowser::detectShortcutConflicts() {}
++
++void MediaBrowser::importSelection()
++{
++    const QList<QUrl> urls = QFileDialog::getOpenFileUrls(this, i18n("Add Media"), m_url);
++    if (urls.isEmpty()) {
++        return;
++    }
++    m_url = urls.first().adjusted(QUrl::RemoveFilename);
++    pCore->activeBin()->droppedUrls(urls);
++}
++#else
+ #include "bin.h"
+ #include "clipcreator.hpp"
+ #include "core.h"
+@@ -586,3 +639,4 @@ void MediaBrowser::forward()
+ {
+     m_op->forward();
+ }
++#endif
+diff --git a/src/bin/mediabrowser.h b/src/bin/mediabrowser.h
+index dbf5a44..959dc42 100644
+--- a/src/bin/mediabrowser.h
++++ b/src/bin/mediabrowser.h
+@@ -7,6 +7,34 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ 
+ #pragma once
+ 
++#ifdef KDENLIVE_NO_KIOFILEWIDGETS
++// Android: KIOFileWidgets (KDirOperator & co) is not available. The media browser
++// is reduced to a launcher for the system document picker.
++#include <QUrl>
++#include <QWidget>
++
++class MediaBrowser : public QWidget
++{
++    Q_OBJECT
++
++public:
++    explicit MediaBrowser(QWidget *parent = nullptr);
++    ~MediaBrowser() override;
++    const QUrl url() const;
++    void setUrl(const QUrl url);
++    void back();
++    void forward();
++
++public Q_SLOTS:
++    void detectShortcutConflicts();
++
++private Q_SLOTS:
++    void importSelection();
++
++private:
++    QUrl m_url;
++};
++#else
+ #include <KDirOperator>
+ #include <QPointer>
+ #include <QTimer>
+@@ -74,3 +102,4 @@ private Q_SLOTS:
+     void slotViewDoubleClicked();
+     void importSelection();
+ };
++#endif
+diff --git a/src/core.cpp b/src/core.cpp
+index f020a20..07b8a64 100644
+--- a/src/core.cpp
++++ b/src/core.cpp
+@@ -193,6 +193,10 @@ bool Core::build(LinuxPackageType packageType, bool testMode, bool debugMode, bo
+             KdenliveSettings::setLastSeenVersionMinor(currentVersion.at(1).toInt());
+             KdenliveSettings::setLastSeenVersionMicro(currentVersion.at(2).toInt());
+         }
++#ifdef Q_OS_ANDROID
++        // TODO: the welcome screen does not fit on a phone display in landscape yet
++        showWelcome = false;
++#endif
+         m_self->buildSplash(firstRun, showWelcome && KdenliveSettings::showWelcome() && !KdenliveSettings::openlastproject(), showRecovery, wasUpgraded);
+     }
+     if (m_self->closing) {
+@@ -380,6 +384,11 @@ void Core::initGUI(const QString &MltPath, const QUrl &Url, const QStringList &c
+         return;
+     }
+     KDDockWidgets::Config::self().setDragAboutToStartFunc([](KDDockWidgets::Core::Draggable *) -> bool {
++#ifdef Q_OS_ANDROID
++        // Dragging dock panels crashes in KDDockWidgets (null floating window in DragController::StateDragging::handleMouseMove) and floating panels
++        // create extra native Android windows (Qt surface deadlock aborts): no panel dragging on Android, use the layout presets instead.
++        return false;
++#endif
+         if (!KdenliveSettings::showtitlebars()) {
+             pCore->updateHideBarsTimer(true);
+         }
+diff --git a/src/dialogs/Simplesplash.qml b/src/dialogs/Simplesplash.qml
+index c0e0c3d..136e523 100644
+--- a/src/dialogs/Simplesplash.qml
++++ b/src/dialogs/Simplesplash.qml
+@@ -28,6 +28,13 @@ Window {
+     y: (Screen.height - splashContent.height) / 2
+     width: splashContent.width
+     height: splashContent.height
++    // Android places new windows at the top-left corner and ignores the bindings above: centre explicitly once the size is known
++    // (Android resizes every top-level window to the full screen, so the card is centred inside the window instead.)
++    function centerOnScreen() {
++        if (Qt.platform.os === "android") {
++            splashContent.anchors.centerIn = splashContent.parent
++        }
++    }
+     signal openLink(string url)
+     signal openBlank()
+     signal resetConfig()
+@@ -336,6 +343,7 @@ Window {
+         }
+     }
+     Component.onCompleted: {
++        centerOnScreen();
+         visible = true;
+         if (splash.crashRecovery) {
+             normalStartButton.forceActiveFocus();
+diff --git a/src/dialogs/Splash.qml b/src/dialogs/Splash.qml
+index 57659e4..ad49d26 100644
+--- a/src/dialogs/Splash.qml
++++ b/src/dialogs/Splash.qml
+@@ -56,10 +56,15 @@ Window {
+     flags: Qt.FramelessWindowHint
+     x: (Screen.width - width) / 2
+     y: (Screen.height - height) / 2
+-    minimumWidth: splashContent.implicitWidth
+-    minimumHeight: splashContent.implicitHeight
+-    width: splashContent.implicitWidth
+-    height: splashContent.implicitHeight
++    // Android resizes every top-level window to the full screen: centre the card inside it instead of filling the window
++    function centerOnScreen() {
++        if (Qt.platform.os === "android") {
++            splashContent.width = splashContent.implicitWidth
++            splashContent.height = splashContent.implicitHeight
++            splashContent.anchors.fill = undefined
++            splashContent.anchors.centerIn = splashContent.parent
++        }
++    }
+ 
+     onClosing: function(close) {
+       close.accepted = true
+@@ -85,6 +90,7 @@ Window {
+     }
+ 
+     Component.onCompleted: {
++        centerOnScreen();
+         if (splash.firstRun)
+             buttonNext.forceActiveFocus();
+         else if (urls.length === 0) {
+diff --git a/src/dialogs/clipcreationdialog.cpp b/src/dialogs/clipcreationdialog.cpp
+index ad01f83..a746461 100644
+--- a/src/dialogs/clipcreationdialog.cpp
++++ b/src/dialogs/clipcreationdialog.cpp
+@@ -26,8 +26,14 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include "widgets/timecodedisplay.h"
+ #include "xml/xml.hpp"
+ 
++#ifndef KDENLIVE_NO_KIOFILEWIDGETS
+ #include <KDirOperator>
+ #include <KFileWidget>
++#endif
++#include <QFileDialog>
++#ifdef Q_OS_ANDROID
++#include "android/androidsetup.h"
++#endif
+ #include <KIO/RenameDialog>
+ #include <KLocalizedString>
+ #include <KMessageBox>
+@@ -465,6 +471,13 @@ void ClipCreationDialog::createClipsCommand(KdenliveDoc *doc, const QString &par
+     if (!QFileInfo::exists(clipFolder)) {
+         clipFolder = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+     }
++#ifdef KDENLIVE_NO_KIOFILEWIDGETS
++    // Android: use the system document picker (content:// URIs)
++    QScopedPointer<QWidget> optionsFrame(f);
++    list = QFileDialog::getOpenFileUrls(static_cast<QWidget *>(doc->parent()), i18n("Add Clips"), QUrl::fromLocalFile(clipFolder));
++    list = androidImportUrls(list);
++    int result = list.isEmpty() ? QDialog::Rejected : QDialog::Accepted;
++#else
+     QScopedPointer<QDialog> dlg(new QDialog(static_cast<QWidget *>(doc->parent())));
+     QScopedPointer<KFileWidget> fileWidget(new KFileWidget(QUrl::fromLocalFile(clipFolder), dlg.data()));
+     auto *layout = new QVBoxLayout;
+@@ -489,10 +502,13 @@ void ClipCreationDialog::createClipsCommand(KdenliveDoc *doc, const QString &par
+         dlg->resize(handle->size());
+     }
+     int result = dlg->exec();
++#endif
+     if (result == QDialog::Accepted) {
+         KdenliveSettings::setAutoimagesequence(b->isChecked());
+         KdenliveSettings::setIgnoresubdirstructure(bf->isChecked());
++#ifndef KDENLIVE_NO_KIOFILEWIDGETS
+         list = fileWidget->selectedUrls();
++#endif
+         if (!list.isEmpty()) {
+             KRecentDirs::add(QStringLiteral(":KdenliveClipFolder"), list.constFirst().adjusted(QUrl::RemoveFilename).toLocalFile());
+         }
+@@ -531,10 +547,12 @@ void ClipCreationDialog::createClipsCommand(KdenliveDoc *doc, const QString &par
+         }
+     }
+     qDebug() << "/////////// found list" << list;
++#ifndef KDENLIVE_NO_KIOFILEWIDGETS
+     KConfigGroup group = conf->group("FileDialogSize");
+     if (handle) {
+         KWindowConfig::saveWindowSize(handle, group);
+     }
++#endif
+     Fun undo = []() { return true; };
+     Fun redo = []() { return true; };
+     const QString id = ClipCreator::createClipsFromList(list, true, parentFolder, model, undo, redo, readyCallBack);
+diff --git a/src/dialogs/clipjobmanager.cpp b/src/dialogs/clipjobmanager.cpp
+index 00e01fe..b05a2f8 100644
+--- a/src/dialogs/clipjobmanager.cpp
++++ b/src/dialogs/clipjobmanager.cpp
+@@ -189,7 +189,18 @@ void ClipJobManager::displayJob(int row)
+         job_params->setPlainText(QStringLiteral("-i {source} -codec:a copy -codec:v copy {output}"));
+     } else {
+         url_binary->setText(m_binaries.value(jobId));
++#ifdef Q_OS_ANDROID
++        // the stock custom job ships without an executable; the bundled ffmpeg lives at a per-install path
++        if (url_binary->text().isEmpty() && jobId == QLatin1String("custom")) {
++            url_binary->setText(KdenliveSettings::ffmpegpath());
++        }
++#endif
+         job_params->setPlainText(m_params.value(jobId));
++#ifdef Q_OS_ANDROID
++        if (job_params->toPlainText().isEmpty() && jobId == QLatin1String("custom")) {
++            job_params->setPlainText(QStringLiteral("-i {source} -codec:a copy -codec:v copy {output}"));
++        }
++#endif
+     }
+     destination_pattern->setText(m_output.value(jobId));
+     folder_name->setText(m_folderNames.value(jobId));
+@@ -316,9 +327,21 @@ QMap<QString, QString> ClipJobManager::getJobParameters(const QString &jobId)
+     KConfigGroup idGroup(&conf, "Ids");
+     result.insert(QLatin1String("description"), idGroup.readEntry(jobId, i18n("Job description")));
+     KConfigGroup group(&conf, "Binary");
+-    result.insert(QLatin1String("binary"), group.readEntry(jobId, QString()));
++    QString binary = group.readEntry(jobId, QString());
++#ifdef Q_OS_ANDROID
++    if (binary.isEmpty() && jobId == QLatin1String("custom")) {
++        binary = KdenliveSettings::ffmpegpath();
++    }
++#endif
++    result.insert(QLatin1String("binary"), binary);
+     KConfigGroup paramGroup(&conf, "Parameters");
+-    result.insert(QLatin1String("parameters"), paramGroup.readEntry(jobId, QString()));
++    QString parameters = paramGroup.readEntry(jobId, QString());
++#ifdef Q_OS_ANDROID
++    if (parameters.isEmpty() && jobId == QLatin1String("custom")) {
++        parameters = QStringLiteral("-i {source} -codec:a copy -codec:v copy {output}");
++    }
++#endif
++    result.insert(QLatin1String("parameters"), parameters);
+     KConfigGroup outGroup(&conf, "Output");
+     result.insert(QLatin1String("output"), outGroup.readEntry(jobId, QString()));
+     KConfigGroup p1Group(&conf, "Param1Type");
+diff --git a/src/dialogs/renderwidget.cpp b/src/dialogs/renderwidget.cpp
+index b9859fa..b3df4d4 100644
+--- a/src/dialogs/renderwidget.cpp
++++ b/src/dialogs/renderwidget.cpp
+@@ -12,6 +12,9 @@
+ #include "bin/projectfolder.h"
+ #include "bin/projectitemmodel.h"
+ #include "core.h"
++#ifdef Q_OS_ANDROID
++#include "android/androidrender.h"
++#endif
+ #include "dialogs/renderpresetdialog.h"
+ #include "dialogs/wizard.h"
+ #include "doc/kdenlivedoc.h"
+@@ -71,8 +74,10 @@
+ #include <QTreeWidgetItem>
+ #include <QtGlobal>
+ 
++#ifndef KDENLIVE_NO_PURPOSE
+ #include <Purpose/AlternativesModel>
+ #include <Purpose/Menu>
++#endif
+ 
+ // Running job status
+ enum JOBSTATUS { WAITINGJOB = 0, STARTINGJOB, RUNNINGJOB, FINISHEDJOB, FAILEDJOB, ABORTEDJOB };
+@@ -520,6 +525,7 @@ RenderWidget::RenderWidget(bool enableProxy, QWidget *parent)
+     header->setSectionResizeMode(0, QHeaderView::Fixed);
+     header->resizeSection(0, size + 4);
+ 
++#ifndef Q_OS_ANDROID
+     // Find path for Kdenlive renderer
+     if (KdenliveSettings::kdenliverendererpath().isEmpty() || !QFileInfo::exists(KdenliveSettings::kdenliverendererpath())) {
+         KdenliveSettings::setKdenliverendererpath(QString());
+@@ -536,6 +542,7 @@ RenderWidget::RenderWidget(bool enableProxy, QWidget *parent)
+     if (KdenliveSettings::kdenliverendererpath().isEmpty()) {
+         KMessageBox::error(this, i18n("Could not find the kdenlive_render application, something is wrong with your installation. Rendering will not work"));
+     }
++#endif
+ 
+ #ifndef NODBUS
+     QDBusConnectionInterface *interface = QDBusConnection::sessionBus().interface();
+@@ -547,10 +554,14 @@ RenderWidget::RenderWidget(bool enableProxy, QWidget *parent)
+     m_view.shutdown->setEnabled(false);
+ #endif
+ 
++#ifndef KDENLIVE_NO_PURPOSE
+     m_shareMenu = new Purpose::Menu();
+     m_view.shareButton->setMenu(m_shareMenu);
+     m_view.shareButton->setIcon(QIcon::fromTheme(QStringLiteral("document-share")));
+     connect(m_shareMenu, &Purpose::Menu::finished, this, &RenderWidget::slotShareActionFinished);
++#else
++    m_view.shareButton->hide();
++#endif
+ 
+     // Search
+     m_view.searchLine->setClearButtonEnabled(true);
+@@ -833,6 +844,18 @@ void RenderWidget::slotUpdateButtons()
+         m_view.buttonGenerateScript->setEnabled(false);
+     } else {
+         std::unique_ptr<RenderPresetModel> &profile = RenderPresetRepository::get()->getPreset(m_currentProfile);
++#ifdef Q_OS_ANDROID
++        // No file dialog friendly workflow on a phone: propose a default output file in the render folder
++        if (m_view.out_file->text().isEmpty() && pCore->currentDoc()) {
++            QString folder = pCore->currentDoc()->projectRenderFolder();
++            if (folder.isEmpty()) {
++                folder = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
++            }
++            QDir().mkpath(folder);
++            m_view.out_file->setText(folder + QStringLiteral("/Kdenlive_%1.%2")
++                                                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")), profile->extension()));
++        }
++#endif
+         m_view.buttonRender->setEnabled(!m_view.out_file->url().isEmpty() && profile->error().isEmpty());
+         m_view.buttonGenerateScript->setEnabled(!m_view.out_file->url().isEmpty() && profile->error().isEmpty());
+         m_view.buttonSaveAs->setEnabled(true);
+@@ -924,12 +947,14 @@ void RenderWidget::slotPrepareExport(bool delayedRendering)
+         m_view.infoMessage->animatedShow();
+         return;
+     }
++#ifndef Q_OS_ANDROID
+     if (!QFile::exists(KdenliveSettings::meltpath())) {
+         m_view.infoMessage->setMessageType(KMessageWidget::Warning);
+         m_view.infoMessage->setText(i18n("Cannot find the melt program required for rendering (part of Mlt)"));
+         m_view.infoMessage->animatedShow();
+         return;
+     }
++#endif
+     if (pCore->bin()->usesVariableFpsClip()) {
+         // Empty project, don't attempt to render
+         m_view.infoMessage->setMessageType(KMessageWidget::Warning);
+@@ -1208,6 +1233,13 @@ void RenderWidget::checkRenderStatus(int lastStatus)
+ void RenderWidget::startRendering(RenderJobItem *item)
+ {
+     auto rendererArgs = item->data(1, ParametersRole).toStringList();
++#ifdef Q_OS_ANDROID
++    // No melt / kdenlive_render programs on Android: render inside the app process
++    if (rendererArgs.size() > 2) {
++        AndroidRender::instance()->start(rendererArgs.at(2));
++        return;
++    }
++#endif
+     qDebug() << "starting kdenlive_render process using: " << KdenliveSettings::kdenliverendererpath();
+     QProcess proc;
+     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+@@ -1829,11 +1861,13 @@ void RenderWidget::setRenderStatus(const QString &dest, int status, const QStrin
+         QString t = i18n("Rendering finished in %1", est);
+         item->setData(1, Qt::UserRole, t);
+ 
++#ifndef KDENLIVE_NO_PURPOSE
+         m_shareMenu->model()->setInputData(
+             QJsonObject{{QStringLiteral("mimeType"), QMimeDatabase().mimeTypeForFile(item->data(1, Qt::DisplayRole).toString()).name()},
+                         {QStringLiteral("urls"), QJsonArray({item->data(1, Qt::DisplayRole).toString()})}});
+         m_shareMenu->model()->setPluginType(QStringLiteral("Export"));
+         m_shareMenu->reload();
++#endif
+ 
+         KNotification *notify = new KNotification(QStringLiteral("RenderFinished"));
+         QString notif;
+@@ -1941,11 +1975,13 @@ void RenderWidget::slotCheckJob()
+         }
+         activate = true;
+         if (current->status() == FINISHEDJOB) {
++#ifndef KDENLIVE_NO_PURPOSE
+             m_shareMenu->model()->setInputData(
+                 QJsonObject{{QStringLiteral("mimeType"), QMimeDatabase().mimeTypeForFile(current->data(1, Qt::DisplayRole).toString()).name()},
+                             {QStringLiteral("urls"), QJsonArray({current->data(1, Qt::DisplayRole).toString()})}});
+             m_shareMenu->model()->setPluginType(QStringLiteral("Export"));
+             m_shareMenu->reload();
++#endif
+             m_view.shareButton->setEnabled(true);
+         } else {
+             m_view.shareButton->setEnabled(false);
+diff --git a/src/dialogs/renderwidget.h b/src/dialogs/renderwidget.h
+index 659414f..48586a7 100644
+--- a/src/dialogs/renderwidget.h
++++ b/src/dialogs/renderwidget.h
+@@ -5,9 +5,11 @@
+ 
+ #pragma once
+ 
++#ifndef KDENLIVE_NO_PURPOSE
+ namespace Purpose {
+ class Menu;
+ }
++#endif
+ 
+ #include "abstractmodel/treeproxymodel.h"
+ #include "bin/model/markerlistmodel.hpp"
+@@ -220,7 +222,9 @@ private:
+     DriveSpaceStatus m_freeSpaceStatus{SpaceOk};
+     QTimer m_memCheckTimer;
+ 
++#ifndef KDENLIVE_NO_PURPOSE
+     Purpose::Menu *m_shareMenu;
++#endif
+     void parseProfiles(const QString &selectedProfile = QString());
+     QUrl filenameWithExtension(QUrl url, const QString &extension);
+     /** @brief Check if a job needs to be started. */
+diff --git a/src/jobs/speedtask.cpp b/src/jobs/speedtask.cpp
+index ae21eb5..0357692 100644
+--- a/src/jobs/speedtask.cpp
++++ b/src/jobs/speedtask.cpp
+@@ -18,6 +18,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <KUrlRequester>
+ #include <QApplication>
+ #include <QCheckBox>
++#include <QStandardPaths>
+ #include <QDialogButtonBox>
+ #include <QDoubleSpinBox>
+ #include <QProcess>
+@@ -50,6 +51,10 @@ void SpeedTask::start(QObject *object, bool force)
+     KUrlRequester fileUrl(&d);
+     auto binClip = pCore->projectItemModel()->getClipByBinID(binIds.front().section(QLatin1Char('/'), 0, 0));
+     QDir folder = QFileInfo(binClip->url()).absoluteDir();
++#ifdef Q_OS_ANDROID
++    // the clip usually lives in shared storage (Movies/...), where plain files like .mlt cannot be created
++    folder = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
++#endif
+     folder.mkpath(i18n("Speed Change"));
+     folder.cd(i18n("Speed Change"));
+     if (binIds.size() > 1) {
+diff --git a/src/jobs/stabilizetask.cpp b/src/jobs/stabilizetask.cpp
+index 6e1e1f7..3d93652 100644
+--- a/src/jobs/stabilizetask.cpp
++++ b/src/jobs/stabilizetask.cpp
+@@ -19,6 +19,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <QThread>
+ 
+ #include <KLocalizedString>
++#include <QStandardPaths>
+ 
+ StabilizeTask::StabilizeTask(const ObjectId &owner, const QString &binId, const QString &destination, int in, int out,
+                              const std::unordered_map<QString, QVariant> &filterParams, QObject *object)
+@@ -43,6 +44,13 @@ void StabilizeTask::start(QObject *, bool force)
+             qDebug() << "==== ANALYSING BINID: " << binId;
+             auto binClip = pCore->projectItemModel()->getClipByBinID(binId.section(QLatin1Char('/'), 0, 0));
+             QString mltfile = binClip->url() + QStringLiteral(".mlt");
++#ifdef Q_OS_ANDROID
++            // clips live in shared storage where plain .mlt/.trf files cannot be created: keep them in the app's data folder
++            QDir stabDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
++            stabDir.mkpath(QStringLiteral("Stabilize"));
++            stabDir.cd(QStringLiteral("Stabilize"));
++            mltfile = stabDir.absoluteFilePath(QFileInfo(binClip->url()).fileName() + QStringLiteral(".mlt"));
++#endif
+             destinations[binId] = mltfile;
+         }
+         // Now we have to create the jobs objects. This is trickier than usual, since the parameters are different for each job (each clip has its own
+diff --git a/src/main.cpp b/src/main.cpp
+index 4b17f6b..0f2b9e0 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -57,6 +57,10 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <QJsonObject>
+ #include <QProcess>
+ #include <QQuickStyle>
++#ifdef Q_OS_ANDROID
++#include "android/androidsetup.h"
++#include "android/androidui.h"
++#endif
+ #include <QQuickWindow>
+ #include <QResource>
+ 
+@@ -247,11 +251,54 @@ int main(int argc, char *argv[])
+     // trigger initialisation of proper icon theme
+     KIconTheme::initTheme();
+ 
++#ifdef Q_OS_ANDROID
++    // The desktop UI is far too large for a phone display: scale it down (override with QT_SCALE_FACTOR)
++    if (!qEnvironmentVariableIsSet("QT_SCALE_FACTOR")) {
++        // tunable without rebuilding: put a number (e.g. 0.5) in <app external files>/ui_scale.txt
++        QByteArray scale("0.5");
++        QFile scaleFile(QStringLiteral("/storage/emulated/0/Android/data/org.qtproject.example.kdenlive/files/ui_scale.txt"));
++        if (scaleFile.open(QIODevice::ReadOnly)) {
++            const QByteArray value = scaleFile.readAll().trimmed();
++            if (!value.isEmpty()) {
++                scale = value;
++            }
++        }
++        qputenv("QT_SCALE_FACTOR", scale);
++    }
++#endif
+     Application app(argc, argv);
++#ifdef Q_OS_ANDROID
++    androidPrepareData();
++    androidInstallUiHelpers();
++    // Helper programs shipped as executables named like libraries (the only place Android lets an app execute files from)
++    {
++        const QString nativeDir = androidNativeLibDir();
++        KdenliveSettings::setMeltpath(nativeDir + QStringLiteral("/libmelt.so"));
++        if (QFile::exists(nativeDir + QStringLiteral("/libffmpeg.so"))) {
++            KdenliveSettings::setFfmpegpath(nativeDir + QStringLiteral("/libffmpeg.so"));
++        }
++        if (QFile::exists(nativeDir + QStringLiteral("/libffprobe.so"))) {
++            KdenliveSettings::setFfprobepath(nativeDir + QStringLiteral("/libffprobe.so"));
++        }
++    }
++    androidRequestMediaPermissions();
++    androidInstallLifecycleHooks();
++    // Android may kill the app any time: always come back to the last project
++    KdenliveSettings::setOpenlastproject(true);
++    // the setup wizard (which normally picks the profile) is skipped on Android
++    if (KdenliveSettings::default_profile().isEmpty()) {
++        KdenliveSettings::setDefault_profile(QStringLiteral("atsc_1080p_30"));
++    }
++#endif
+ 
+     // Default to org.kde.desktop style unless the user forces another style
+     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) {
++#ifdef Q_OS_ANDROID
++        // org.kde.desktop (qqc2-desktop-style) is not available on Android
++        QQuickStyle::setStyle(QStringLiteral("Basic"));
++#else
+         QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
++#endif
+     }
+ 
+     // trigger initialisation of proper application style
+diff --git a/src/mainwindow.cpp b/src/mainwindow.cpp
+index d26abfb..64a343d 100644
+--- a/src/mainwindow.cpp
++++ b/src/mainwindow.cpp
+@@ -95,8 +95,12 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <KIconTheme>
+ #include <KLocalizedString>
+ #include <KMessageBox>
++#ifndef KDENLIVE_NO_NEWSTUFF
+ #include <KNSWidgets/Dialog>
++#endif
++#ifndef KDENLIVE_NO_NOTIFYCONFIG
+ #include <KNotifyConfigWidget>
++#endif
+ #include <KRecentDirs>
+ #include <KShortcutsDialog>
+ #include <KStandardAction>
+@@ -156,6 +160,9 @@ MainWindow::MainWindow(QWidget *parent)
+     flags |= KDDockWidgets::Config::Flag_HideTitleBarWhenTabsVisible;
+     flags |= KDDockWidgets::Config::Flag_AllowReorderTabs;
+     flags |= KDDockWidgets::Config::Flag_TitleBarShowAutoHide;
++#ifdef Q_OS_ANDROID
++    flags |= KDDockWidgets::Config::Flag_TitleBarNoFloatButton; // no floating panels on Android (see core.cpp)
++#endif
+ 
+     KDDockWidgets::Config::self().setFlags(flags);
+     KDDockWidgets::Core::FloatingWindow::s_windowFlagsOverride = Qt::Tool;
+@@ -974,7 +981,9 @@ void MainWindow::slotReloadEffects(const QStringList &paths)
+ 
+ void MainWindow::configureNotifications()
+ {
++#ifndef KDENLIVE_NO_NOTIFYCONFIG
+     KNotifyConfigWidget::configure(this);
++#endif
+ }
+ 
+ void MainWindow::slotFullScreen()
+@@ -1038,6 +1047,14 @@ bool MainWindow::readOptions()
+         KRecentDirs::add(QStringLiteral(":KdenliveClipFolder"), QStandardPaths::writableLocation(QStandardPaths::MoviesLocation));
+         KRecentDirs::add(QStringLiteral(":KdenliveProjectsFolder"), QStandardPaths::writableLocation(QStandardPaths::MoviesLocation));
+ 
++#ifdef Q_OS_ANDROID
++        // There are no external programs (melt, ffmpeg, kdenlive_render) on Android, skip the wizard
++        KdenliveSettings::setSdlAudioBackend(QStringLiteral("sdl2_audio"));
++        KdenliveSettings::setKdenliverendererpath(QStringLiteral("/nonexistent/kdenlive_render"));
++        if (KdenliveSettings::default_profile().isEmpty()) {
++            KdenliveSettings::setDefault_profile(QStringLiteral("atsc_1080p_30"));
++        }
++#else
+         // this is our first run, show Wizard
+         QPointer<Wizard> w = new Wizard(true);
+         if (w->exec() == QDialog::Accepted && w->isOk()) {
+@@ -1047,13 +1064,16 @@ bool MainWindow::readOptions()
+             delete w;
+             ::exit(1);
+         }
++#endif
+     } else if (!KdenliveSettings::ffmpegpath().isEmpty() && !QFile::exists(KdenliveSettings::ffmpegpath())) {
++#ifndef Q_OS_ANDROID
+         // Invalid entry for FFmpeg, check system
+         QPointer<Wizard> w = new Wizard(true);
+         if (w->exec() == QDialog::Accepted && w->isOk()) {
+             w->adjustSettings();
+         }
+         delete w;
++#endif
+     }
+     if (firstRun) {
+         if (TransitionsRepository::get()->exists(QStringLiteral("qtblend")) && TransitionsRepository::get()->getVersion(QStringLiteral("qtblend")) > 200) {
+@@ -1541,6 +1561,7 @@ void MainWindow::slotEditKeys()
+ {
+     KShortcutsDialog *dialog = new KShortcutsDialog(KShortcutsEditor::AllActions, KShortcutsEditor::LetterShortcutsAllowed, this);
+ 
++#ifndef KDENLIVE_NO_NEWSTUFF
+     KNSWidgets::Action *downloadKeybordSchemes =
+         new KNSWidgets::Action(i18n("Download New Keyboard Schemes…"), QStringLiteral(":data/kdenlive_keyboardschemes.knsrc"), this);
+     connect(downloadKeybordSchemes, &KNSWidgets::Action::dialogFinished, this, [&, dialog](const QList<KNSCore::Entry> &changedEntries) {
+@@ -1585,6 +1606,7 @@ void MainWindow::slotEditKeys()
+     });
+ 
+     dialog->addActionToSchemesMoreButton(downloadKeybordSchemes);
++#endif
+     dialog->setAttribute(Qt::WA_DeleteOnClose);
+     dialog->addCollection(actionCollection(), i18nc("general keyboard shortcuts", "General"));
+ 
+diff --git a/src/mltconnection.cpp b/src/mltconnection.cpp
+index 739ec34..8dc8298 100644
+--- a/src/mltconnection.cpp
++++ b/src/mltconnection.cpp
+@@ -21,6 +21,10 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <clocale>
+ #include <lib/localeHandling.h>
+ #include <mlt++/MltFactory.h>
++#ifdef Q_OS_ANDROID
++#include "android/androidsetup.h"
++#include "android/androidrender.h"
++#endif
+ #include <mlt++/MltRepository.h>
+ 
+ static void mlt_log_handler(void *service, int mlt_level, const char *format, va_list args)
+@@ -94,7 +98,20 @@ MltConnection::MltConnection(const QString &mltPath)
+ 
+     // After initialising the MLT factory, set the locale back from user default to C
+     // to ensure numbers are always serialised with . as decimal point.
++#ifdef Q_OS_ANDROID
++    // capture module loading problems (stderr is not visible on Android)
++    mlt_log_set_level(MLT_LOG_VERBOSE);
++    mlt_log_set_callback(mlt_log_handler);
++#endif
++#ifdef Q_OS_ANDROID
++    // MLT is built RELOCATABLE and would look relative to /system/bin/app_process: give it the native lib dir explicitly
++    const QByteArray androidMltDir = qgetenv("MLT_REPOSITORY");
++    m_repository = std::unique_ptr<Mlt::Repository>(Mlt::Factory::init(androidMltDir.constData()));
++    androidInitFFmpeg();
++    androidDevSelfTest();
++#else
+     m_repository = std::unique_ptr<Mlt::Repository>(Mlt::Factory::init());
++#endif
+ 
+ #ifdef Q_OS_FREEBSD
+     setlocale(MLT_LC_CATEGORY, nullptr);
+@@ -111,7 +128,15 @@ MltConnection::MltConnection(const QString &mltPath)
+         producersList << producers->get_name(i);
+     }
+     KdenliveSettings::setProducerslist(producersList);
++#ifdef Q_OS_ANDROID
++    qDebug() << "MLT producers (" << nb_producers << "):" << producersList.mid(0, 40);
++    qDebug() << "MLT repository dir:" << qgetenv("MLT_REPOSITORY") << "data:" << qgetenv("MLT_DATA");
++#endif
++#ifdef Q_OS_ANDROID
++    mlt_log_set_level(MLT_LOG_INFO);
++#else
+     mlt_log_set_level(MLT_LOG_ERROR);
++#endif
+     mlt_log_set_callback(mlt_log_handler);
+     refreshLumas();
+ }
+@@ -312,6 +337,11 @@ QString MltConnection::locateMeltExe(const QString &profilePath)
+ 
+     qWarning() << appName << "executable was not found!";
+ 
++#ifdef Q_OS_ANDROID
++    // melt cannot be spawned as a process on Android
++    return meltPath;
++#endif
++
+     if (qEnvironmentVariableIsSet("MLT_TESTS")) {
+         qWarning() << "Stop here, not asking user for melt path, because we are in a test environment";
+         return meltPath;
+diff --git a/src/mltcontroller/clippropertiescontroller.cpp b/src/mltcontroller/clippropertiescontroller.cpp
+index 5b14364..82fd387 100644
+--- a/src/mltcontroller/clippropertiescontroller.cpp
++++ b/src/mltcontroller/clippropertiescontroller.cpp
+@@ -24,10 +24,12 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <KDualAction>
+ #include <KLocalizedString>
+ 
++#ifndef KDENLIVE_NO_FILEMETADATA
+ #include <KFileMetaData/ExtractionResult>
+ #include <KFileMetaData/Extractor>
+ #include <KFileMetaData/ExtractorCollection>
+ #include <KFileMetaData/PropertyInfo>
++#endif
+ #include <KIO/Global>
+ #include <KIO/OpenFileManagerWindowJob>
+ #include <KMessageBox>
+@@ -110,6 +112,7 @@ QMimeData *AnalysisTree::mimeData(const QList<QTreeWidgetItem *> &list) const
+     return mime;
+ }
+ 
++#ifndef KDENLIVE_NO_FILEMETADATA
+ class ExtractionResult : public KFileMetaData::ExtractionResult
+ {
+ public:
+@@ -181,6 +184,7 @@ private:
+     QMap<QString, QString> *m_results;
+     Q_DISABLE_COPY(ExtractionResult)
+ };
++#endif
+ 
+ ClipPropertiesController::ClipPropertiesController(const QString &clipName, ClipController *controller, QWidget *parent)
+     : QWidget(parent)
+@@ -1585,14 +1589,18 @@ void ClipPropertiesController::fillProperties()
+ 
+ void ClipPropertiesController::extractInfo(const QString &url)
+ {
++    QMap<QString, QString> extractionMap;
++#ifndef KDENLIVE_NO_FILEMETADATA
+     KFileMetaData::ExtractorCollection metaDataCollection;
+     QMimeDatabase mimeDatabase;
+     QMimeType mimeType = mimeDatabase.mimeTypeForFile(url);
+-    QMap<QString, QString> extractionMap;
+     for (KFileMetaData::Extractor *plugin : metaDataCollection.fetchExtractors(mimeType.name())) {
+         ExtractionResult extractionResult(url, mimeType.name(), &extractionMap);
+         plugin->extract(&extractionResult);
+     }
++#else
++    Q_UNUSED(url)
++#endif
+     if (m_closing) {
+         return;
+     }
+diff --git a/src/monitor/monitor.cpp b/src/monitor/monitor.cpp
+index 4e5b642..4c2d7bb 100644
+--- a/src/monitor/monitor.cpp
++++ b/src/monitor/monitor.cpp
+@@ -47,7 +47,9 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <KActionMenu>
+ #include <KColorScheme>
+ #include <KDualAction>
++#ifndef KDENLIVE_NO_KIOFILEWIDGETS
+ #include <KFileWidget>
++#endif
+ #include <KMessageBox>
+ #include <KMessageWidget>
+ #include <KRecentDirs>
+@@ -1544,6 +1546,13 @@ void Monitor::slotExtractCurrentFrame(QString frameName, bool addToProject, bool
+     if (framesFolder.isEmpty()) {
+         framesFolder = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+     }
++#ifdef KDENLIVE_NO_KIOFILEWIDGETS
++    // Android: no embedded file browser, save in the app's pictures folder
++    QCheckBox *b = nullptr;
++    {
++        QString selectedFile = QDir(framesFolder).filePath(frameName);
++        bool useSourceResolution = false;
++#else
+     QScopedPointer<QDialog> dlg(new QDialog(this));
+     QScopedPointer<KFileWidget> fileWidget(new KFileWidget(QUrl::fromLocalFile(framesFolder), dlg.data()));
+     dlg->setWindowTitle(addToProject ? i18nc("@title:window", "Save Image to Project") : i18nc("@title:window", "Save Image"));
+@@ -1582,6 +1591,7 @@ void Monitor::slotExtractCurrentFrame(QString frameName, bool addToProject, bool
+     if (dlg->exec() == QDialog::Accepted) {
+         QString selectedFile = fileWidget->selectedFile();
+         bool useSourceResolution = b != nullptr && b->isChecked();
++#endif
+         if (!selectedFile.isEmpty()) {
+             if (b != nullptr) {
+                 KdenliveSettings::setExportframe_usingsourceres(useSourceResolution);
+diff --git a/src/project/projectmanager.cpp b/src/project/projectmanager.cpp
+index cede1f2..1bb8113 100644
+--- a/src/project/projectmanager.cpp
++++ b/src/project/projectmanager.cpp
+@@ -54,6 +54,11 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+ #include <QAction>
+ #include <QCryptographicHash>
+ #include <QFileDialog>
++#include <QRegularExpression>
++#include <QInputDialog>
++#ifdef Q_OS_ANDROID
++#include "android/androidsetup.h"
++#endif
+ #include <QJsonArray>
+ #include <QJsonDocument>
+ #include <QJsonObject>
+@@ -660,6 +665,16 @@ void ProjectManager::saveRecentFiles()
+ 
+ const QString ProjectManager::getSavePath(const QUrl &url, bool saveACopy)
+ {
++#ifdef Q_OS_ANDROID
++    // No desktop file dialog on Android: projects live in the app's projects folder
++    if (url.isValid() && url.isLocalFile() && !saveACopy) {
++        return url.toLocalFile();
++    }
++    QDir projectsDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/projects"));
++    projectsDir.mkpath(QStringLiteral("."));
++    return projectsDir.absoluteFilePath(
++        QStringLiteral("Project_%1%2.kdenlive").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")), saveACopy ? QStringLiteral("_copy") : QString()));
++#endif
+     QFileDialog fd(pCore->window());
+     if (saveACopy) {
+         fd.setWindowTitle(i18nc("@title:window", "Save Copy"));
+@@ -724,7 +739,38 @@ void ProjectManager::slotOpenFile()
+     if (!QFileInfo::exists(projectFolder)) {
+         projectFolder = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+     }
++#ifdef Q_OS_ANDROID
++    // Saved projects live in the app's projects folder: offer them in a list, with a way to browse the device
++    QUrl url;
++    {
++        QDir projectsDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/projects"));
++        const QFileInfoList projects = projectsDir.entryInfoList({QStringLiteral("*.kdenlive")}, QDir::Files, QDir::Time);
++        const QString browse = i18n("Browse device…");
++        QStringList labels;
++        for (const QFileInfo &info : projects) {
++            labels << QStringLiteral("%1  (%2)").arg(info.completeBaseName(), QLocale().toString(info.lastModified(), QLocale::ShortFormat));
++        }
++        labels << browse;
++        bool ok = false;
++        const QString chosen = QInputDialog::getItem(pCore->window(), i18n("Open Project"), i18n("Saved projects:"), labels, 0, false, &ok);
++        if (ok) {
++            const int index = labels.indexOf(chosen);
++            if (index >= 0 && index < projects.size()) {
++                url = QUrl::fromLocalFile(projects.at(index).absoluteFilePath());
++            } else {
++                url = QFileDialog::getOpenFileUrl(pCore->window(), QString(), QUrl::fromLocalFile(projectFolder), getProjectNameFilters());
++            }
++        }
++    }
++#else
+     QUrl url = QFileDialog::getOpenFileUrl(pCore->window(), QString(), QUrl::fromLocalFile(projectFolder), getProjectNameFilters());
++#endif
++#ifdef Q_OS_ANDROID
++    if (url.isValid()) {
++        // the system picker returns content:// documents: copy them into the app's projects folder
++        url = androidImportUrls({url}, QStringLiteral("projects")).value(0);
++    }
++#endif
+     if (!url.isValid()) {
+         if (!m_project) {
+             // First opening, switch to blank project
+@@ -774,6 +820,22 @@ bool ProjectManager::checkForBackupFile(const QUrl &url, bool newFile)
+                 delete stale;
+                 continue;
+             }
++#ifdef Q_OS_ANDROID
++            {
++                // Android ends apps by killing them, so an autosave of an empty project is left behind after every session:
++                // only offer recovery when the autosave references media files
++                static const QRegularExpression mediaRe(
++                    QStringLiteral("name=\"resource\">[^<]*\\.(mp4|mov|mkv|m4v|avi|webm|3gp|jpg|jpeg|png|webp|gif|mp3|wav|aac|m4a|flac|ogg|opus)<"),
++                    QRegularExpression::CaseInsensitiveOption);
++                const QString content = QString::fromUtf8(stale->readAll());
++                stale->seek(0);
++                if (!mediaRe.match(content).hasMatch()) {
++                    stale->remove();
++                    delete stale;
++                    continue;
++                }
++            }
++#endif
+             if (!orphanedFile && (!sourceTime.isValid() || QFileInfo(stale->fileName()).lastModified() > sourceTime)) {
+                 orphanedFile = stale;
+             } else {
+diff --git a/src/render/renderserver.cpp b/src/render/renderserver.cpp
+index 51d41f3..00ad55a 100644
+--- a/src/render/renderserver.cpp
++++ b/src/render/renderserver.cpp
+@@ -6,6 +6,9 @@
+ #include "renderserver.h"
+ #include "core.h"
+ #include "mainwindow.h"
++#ifdef Q_OS_ANDROID
++#include "android/androidrender.h"
++#endif
+ #include <KLocalizedString>
+ #include <QCoreApplication>
+ #include <QJsonArray>
+@@ -25,6 +28,10 @@ RenderServer::RenderServer(QObject *parent)
+     }
+     connect(pCore->window(), &MainWindow::abortRenderJob, this, &RenderServer::abortJob, Qt::QueuedConnection);
+     connect(pCore->window(), &MainWindow::abortAllRenderJobs, this, &RenderServer::abortAllJobs, Qt::DirectConnection);
++#ifdef Q_OS_ANDROID
++    connect(AndroidRender::instance(), &AndroidRender::progress, this, &RenderServer::setRenderingProgress, Qt::QueuedConnection);
++    connect(AndroidRender::instance(), &AndroidRender::finished, this, &RenderServer::setRenderingFinished, Qt::QueuedConnection);
++#endif
+     connect(this, &RenderServer::setRenderingProgress, pCore->window(), &MainWindow::setRenderingProgress);
+     connect(this, &RenderServer::setRenderingFinished, pCore->window(), &MainWindow::setRenderingFinished);
+ }
+@@ -81,6 +88,10 @@ void RenderServer::handleJson(const QJsonObject &json, QLocalSocket *socket)
+ 
+ void RenderServer::abortJob(const QString &job)
+ {
++#ifdef Q_OS_ANDROID
++    AndroidRender::instance()->abort(job);
++    return;
++#endif
+     if (m_jobSocket.contains(job)) {
+         m_jobSocket[job]->write("abort");
+         m_jobSocket[job]->flush();
+@@ -91,6 +102,9 @@ void RenderServer::abortJob(const QString &job)
+ 
+ void RenderServer::abortAllJobs()
+ {
++#ifdef Q_OS_ANDROID
++    AndroidRender::instance()->abortAll();
++#endif
+     for (auto i = m_jobSocket.cbegin(), end = m_jobSocket.cend(); i != end; ++i) {
+         i.value()->write("abort");
+         i.value()->flush();
+diff --git a/src/timeline2/view/previewmanager.cpp b/src/timeline2/view/previewmanager.cpp
+index 32cac6c..60f44d7 100644
+--- a/src/timeline2/view/previewmanager.cpp
++++ b/src/timeline2/view/previewmanager.cpp
+@@ -38,6 +38,8 @@ PreviewManager::PreviewManager(Mlt::Tractor *tractor, QUuid uuid, QObject *paren
+     m_previewGatherTimer.setInterval(200);
+     QObject::connect(&m_previewProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &PreviewManager::processEnded);
+ 
++#ifndef Q_OS_ANDROID
++    // (Android: there is no kdenlive_render program, final rendering runs in-process; timeline preview rendering is not available yet)
+     if (KdenliveSettings::kdenliverendererpath().isEmpty() || !QFileInfo::exists(KdenliveSettings::kdenliverendererpath())) {
+         KdenliveSettings::setKdenliverendererpath(QString());
+         Wizard::fixKdenliveRenderPath();
+@@ -46,6 +48,7 @@ PreviewManager::PreviewManager(Mlt::Tractor *tractor, QUuid uuid, QObject *paren
+                                i18n("Could not find the kdenlive_render application, something is wrong with your installation. Rendering will not work"));
+         }
+     }
++#endif
+ 
+     connect(this, &PreviewManager::abortPreview, &m_previewProcess, &QProcess::kill, Qt::DirectConnection);
+     connect(&m_previewProcess, &QProcess::readyReadStandardError, this, &PreviewManager::receivedStderr);
+diff --git a/src/titler/graphicsscenerectmove.cpp b/src/titler/graphicsscenerectmove.cpp
+index cd38be2..208bc76 100644
+--- a/src/titler/graphicsscenerectmove.cpp
++++ b/src/titler/graphicsscenerectmove.cpp
+@@ -88,6 +88,10 @@ MyTextItem::MyTextItem(const QString &txt, QGraphicsItem *parent)
+     setGraphicsEffect(m_shadowEffect);
+     updateGeometry();
+     connect(document(), &QTextDocument::contentsChanged, this, &MyTextItem::doUpdateGeometry);
++#ifdef Q_OS_ANDROID
++    // plain key input from the Android keyboard (predictive text composing regions break rich text editing)
++    setInputMethodHints(inputMethodHints() | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase);
++#endif
+     updateTW(false, 2, 1, 0, 0);
+ }
+ 
+diff --git a/src/titler/titlewidget.cpp b/src/titler/titlewidget.cpp
+index c480be6..83ccbbd 100644
+--- a/src/titler/titlewidget.cpp
++++ b/src/titler/titlewidget.cpp
+@@ -493,6 +493,7 @@ TitleWidget::TitleWidget(const QUrl &url, QString projectTitlePath, Monitor *mon
+     m_buttonSave->setShortcut(Qt::CTRL | Qt::Key_S);
+     connect(m_buttonSave, &QAction::triggered, this, [this]() { saveTitle(); }, Qt::QueuedConnection);
+ 
++#ifndef KDENLIVE_NO_NEWSTUFF
+     m_buttonDownload = new KNSWidgets::Action(i18n("Download New Title Templates…"), QStringLiteral(":data/kdenlive_titles.knsrc"), this);
+     m_buttonDownload->setShortcut(Qt::ALT | Qt::Key_D);
+     m_toolbar->addAction(m_buttonDownload);
+@@ -502,6 +503,7 @@ TitleWidget::TitleWidget(const QUrl &url, QString projectTitlePath, Monitor *mon
+             refreshTemplateBoxContents();
+         }
+     });
++#endif
+ 
+     layout->addWidget(m_toolbar);
+ 
+diff --git a/src/titler/titlewidget.h b/src/titler/titlewidget.h
+index 3c98079..24c91c3 100644
+--- a/src/titler/titlewidget.h
++++ b/src/titler/titlewidget.h
+@@ -19,7 +19,9 @@
+ #include "ui_titlewidget_ui.h"
+ #include "widgets/dragvalue.h"
+ 
++#ifndef KDENLIVE_NO_NEWSTUFF
+ #include <KNSWidgets/Action>
++#endif
+ #include <QMap>
+ #include <QModelIndex>
+ #include <QSignalMapper>
+@@ -153,7 +155,9 @@ private:
+     QAction *m_buttonCursor;
+     QAction *m_buttonSave;
+     QAction *m_buttonLoad;
++#ifndef KDENLIVE_NO_NEWSTUFF
+     KNSWidgets::Action *m_buttonDownload;
++#endif
+     QAction *m_undoAction{nullptr};
+     QAction *m_redoAction{nullptr};
+     QUndoStack *m_undoStack{nullptr};

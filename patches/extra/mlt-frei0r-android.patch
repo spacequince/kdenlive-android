@@ -1,0 +1,85 @@
+diff --git a/src/modules/frei0r/CMakeLists.txt b/src/modules/frei0r/CMakeLists.txt
+index ebc84ea8..d4a01d4b 100644
+--- a/src/modules/frei0r/CMakeLists.txt
++++ b/src/modules/frei0r/CMakeLists.txt
+@@ -29,6 +29,9 @@ if(RELOCATABLE)
+ endif()
+ 
+ target_link_libraries(mltfrei0r PRIVATE mlt ${CMAKE_DL_LIBS})
++if(ANDROID)
++  target_link_libraries(mltfrei0r PRIVATE log)
++endif()
+ 
+ if(MSVC)
+   target_link_libraries(mltfrei0r PRIVATE dirent)
+diff --git a/src/modules/frei0r/factory.c b/src/modules/frei0r/factory.c
+index bad201d6..da69493a 100644
+--- a/src/modules/frei0r/factory.c
++++ b/src/modules/frei0r/factory.c
+@@ -38,6 +38,15 @@
+ #define FREI0R_PLUGIN_PATH "\\lib\\frei0r-1"
+ #else
+ #define LIBSUF ".so"
++
++#ifdef __ANDROID__
++#include <android/log.h>
++/* Android only packages native libraries named lib*.so: plugins are shipped as libfrei0r_<name>.so
++   and the service id is still frei0r.<name> */
++#define F0R_FILE_PREFIX "libfrei0r_"
++#else
++#define F0R_FILE_PREFIX ""
++#endif
+ #ifdef RELOCATABLE
+ #ifdef __APPLE__
+ #define FREI0R_PLUGIN_PATH "/PlugIns/frei0r-1"
+@@ -68,6 +77,11 @@ extern mlt_frame transition_process(mlt_transition transition, mlt_frame a_frame
+ 
+ static char *get_frei0r_path()
+ {
++#ifdef __ANDROID__
++    /* RELOCATABLE builds derive the path from the executable location, which is meaningless inside an APK */
++    if (getenv("FREI0R_PATH"))
++        return strdup(getenv("FREI0R_PATH"));
++#endif
+ #if defined(_WIN32) || defined(RELOCATABLE)
+     char *dirname = malloc(strlen(mlt_environment("MLT_APPDIR")) + strlen(FREI0R_PLUGIN_PATH) + 1);
+     strcpy(dirname, mlt_environment("MLT_APPDIR"));
+@@ -493,11 +507,11 @@ static void *create_frei0r_item(mlt_profile profile,
+         firstname = strtok_r(NULL, ".", &save_firstptr);
+ #endif
+         if (strncmp(directory, "$HOME", 5))
+-            snprintf(soname, PATH_MAX, "%s/%s" LIBSUF, directory, firstname);
++            snprintf(soname, PATH_MAX, "%s/" F0R_FILE_PREFIX "%s" LIBSUF, directory, firstname);
+         else
+             snprintf(soname,
+                      PATH_MAX,
+-                     "%s%s/%s" LIBSUF,
++                     "%s%s/" F0R_FILE_PREFIX "%s" LIBSUF,
+                      getenv("HOME"),
+                      strchr(directory, '/'),
+                      firstname);
+@@ -590,6 +604,13 @@ MLTFREI0R_EXPORT MLT_REPOSITORY
+         for (int i = 0; i < mlt_properties_count(direntries); i++) {
+             char *name = mlt_properties_get_value(direntries, i);
+             char *shortname = name + strlen(dirname) + 1;
++#ifdef __ANDROID__
++            /* the app's native lib directory also holds Qt, KDE, ffmpeg... libraries: only look at frei0r plugins */
++            if (strncmp(shortname, F0R_FILE_PREFIX, strlen(F0R_FILE_PREFIX)))
++                continue;
++
++            shortname += strlen(F0R_FILE_PREFIX);
++#endif
+ #ifdef _WIN32
+             char *firstname = strtok(shortname, ".");
+ #else
+@@ -606,6 +627,10 @@ MLTFREI0R_EXPORT MLT_REPOSITORY
+             mlt_properties plugin_aliases = mlt_properties_get_data(aliases, pluginname, NULL);
+ 
+             void *handle = dlopen(strcat(name, LIBSUF), RTLD_LAZY);
++#ifdef __ANDROID__
++            if (!handle)
++                __android_log_print(ANDROID_LOG_WARN, "MLTfrei0r", "cannot load %s: %s", name, dlerror());
++#endif
+             if (handle) {
+                 void (*plginfo)(f0r_plugin_info_t *) = dlsym(handle, "f0r_get_plugin_info");
+ 

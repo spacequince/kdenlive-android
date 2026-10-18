@@ -1,0 +1,83 @@
+diff --git a/libs/ffmpeg/ffmpeg.py b/libs/ffmpeg/ffmpeg.py
+index dcb50275c..be31283d8 100644
+--- a/libs/ffmpeg/ffmpeg.py
++++ b/libs/ffmpeg/ffmpeg.py
+@@ -55,6 +55,9 @@ class subinfo(info.infoclass):
+         self.runtimeDependencies["virtual/base"] = None
+         self.runtimeDependencies["libs/zlib"] = None
+         self.runtimeDependencies["libs/openssl"] = None
++        if CraftCore.compiler.isAndroid:
++            # ANDROID_X264: software H.264 encoding for the Kdenlive Android port
++            self.runtimeDependencies["libs/x264"] = None
+         if not CraftCore.compiler.isAndroid:
+             self.runtimeDependencies["libs/liblame"] = None
+             self.runtimeDependencies["libs/libopus"] = None
+@@ -104,7 +107,8 @@ class Package(AutoToolsPackageBase):
+         if not CraftCore.compiler.isAndroid:
+             self.subinfo.options.configure.args += ["--enable-libmp3lame", "--enable-libass", "--enable-libvpx"]
+         else:
+-            self.subinfo.options.configure.args += ["--disable-programs"]
++            # ANDROID_PROGRAMS: ffmpeg + ffprobe command line tools are shipped as libffmpeg.so/libffprobe.so executables (Kdenlive spawns them)
++            self.subinfo.options.configure.args += ["--enable-ffmpeg", "--enable-ffprobe", "--disable-ffplay"]
+         if "CC" in os.environ:
+             cc = os.environ["CC"]
+             if CraftCore.compiler.isMacOS and not CraftCore.compiler.isNative():
+@@ -178,6 +182,9 @@ class Package(AutoToolsPackageBase):
+             ]
+ 
+         if CraftCore.compiler.isAndroid:
++            self.subinfo.options.configure.args += ["--enable-libx264", "--pkg-config=/usr/bin/pkg-config"]  # ANDROID_X264
++            # hardware encoding/decoding through Android's MediaCodec (needs JNI)  # ANDROID_MEDIACODEC
++            self.subinfo.options.configure.args += ["--enable-jni", "--enable-mediacodec"]
+             # Work around https://github.com/android/ndk/issues/1974 in ndk26.
+             # But also Vulkan video decode isn't well supported on Android anyway.
+             self.subinfo.options.configure.args += ["--disable-vulkan"]
+@@ -228,5 +235,9 @@ class Package(AutoToolsPackageBase):
+                 "INCLUDE": f"{os.environ['INCLUDE']};{CraftStandardDirs.craftRoot() / 'include'}",
+             }
+         if CraftCore.compiler.isAndroid:
+-            return {"PATH": os.pathsep.join([self._ndkToolchainPath, os.environ["PATH"]])}
++            # ANDROID_X264: FFmpeg's cross build falls back to "false" as pkg-config; use the host one with Craft's .pc files
++            return {
++                "PATH": os.pathsep.join([self._ndkToolchainPath, os.environ["PATH"]]),
++                "PKG_CONFIG_LIBDIR": str(CraftStandardDirs.craftRoot() / "lib" / "pkgconfig"),
++            }
+         return {}
+diff --git a/libs/mlt/mlt.py b/libs/mlt/mlt.py
+index 2b7eca7f0..d14c0ebd7 100644
+--- a/libs/mlt/mlt.py
++++ b/libs/mlt/mlt.py
+@@ -94,17 +94,17 @@ class Package(CMakePackageBase):
+         self.subinfo.options.configure.args += [
+             f"-DMOD_AVFORMAT={self.subinfo.options.isActive('libs/ffmpeg').asOnOff}",
+             # TODO Fix decklink module with MSVC
+-            f"-DMOD_DECKLINK={CraftCore.compiler.isMSVC().inverted.asOnOff}",
++            f"-DMOD_DECKLINK={(CraftCore.compiler.isMSVC() or CraftCore.compiler.isAndroid).inverted.asOnOff}",
+             f"-DMOD_FREI0R={self.subinfo.options.isActive('libs/frei0r-plugins').asOnOff}",
+             # don't pull in gtk
+             "-DMOD_GDK=OFF",
+             f"-DMOD_GLAXNIMATE_QT6={self.subinfo.options.isActive('libs/libarchive').asOnOff}",
+-            "-DMOD_JACKRACK=ON",
++            f"-DMOD_JACKRACK={CraftCore.compiler.isAndroid.inverted.asOnOff}",
+             f"-DUSE_LV2={self.subinfo.options.isActive('libs/lilv').asOnOff}",
+             "-DUSE_VST2=OFF",
+             f"-DMOD_MOVIT={useMovit.asOnOff}",
+             f"-DMOD_OPENCV={self.subinfo.options.isActive('libs/opencv/opencv').asOnOff}",
+-            "-DMOD_OPENFX=ON",
++            f"-DMOD_OPENFX={CraftCore.compiler.isAndroid.inverted.asOnOff}",
+             "-DMOD_PLUS=ON",
+             "-DMOD_PLUSGPL=ON",
+             "-DMOD_QT=OFF",
+diff --git a/qt-libs/kddockwidgets/kddockwidgets.py b/qt-libs/kddockwidgets/kddockwidgets.py
+index 16d750e71..1b6f7d4a3 100644
+--- a/qt-libs/kddockwidgets/kddockwidgets.py
++++ b/qt-libs/kddockwidgets/kddockwidgets.py
+@@ -16,6 +16,8 @@ class subinfo(info.infoclass):
+             self.archiveNames[ver] = f"KDDockWidgets-{ver}.tar.gz"
+         self.targetDigests["2.4.1"] = (["5cd9495d9316cf6cc937bb328a7fd491c3248ef2469cfa42511f1039f6148aca"], CraftHash.HashAlgorithm.SHA256)
+         self.defaultTarget = "2.4.1"
++        # Android is Q_OS_LINUX but has no X11
++        self.patchToApply["2.4.1"] = [("android-no-x11.diff", 1)]
+ 
+         self.description = "KDDockWidgets is a Qt dock widget library written by KDAB, suitable for replacing QDockWidget and implementing advanced functionalities missing in Qt."
+         self.webpage = "https://www.kdab.com/introducing-kddockwidgets/"

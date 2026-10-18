@@ -1,0 +1,30 @@
+diff --git a/src/modules/jackrack/plugin_mgr.c b/src/modules/jackrack/plugin_mgr.c
+index cf0b41fa..0baefa37 100644
+--- a/src/modules/jackrack/plugin_mgr.c
++++ b/src/modules/jackrack/plugin_mgr.c
+@@ -349,6 +349,14 @@ static void plugin_mgr_get_dir_plugins(plugin_mgr_t *plugin_mgr, const char *dir
+             strcpy(file_name + dirlen + 1, dir_entry->d_name);
+         }
+ 
++#ifdef __ANDROID__
++        /* the native library directory also holds Qt, KDE, ffmpeg... libraries: only look at LADSPA plugins
++           (shipped as libladspa_<name>.so because Android only packages lib*.so) */
++        if (strncmp(dir_entry->d_name, "libladspa_", 10) != 0) {
++            g_free(file_name);
++            continue;
++        }
++#endif
+         stat(file_name, &info);
+         if (S_ISDIR(info.st_mode))
+             plugin_mgr_get_dir_plugins(plugin_mgr, file_name);
+@@ -389,6 +397,10 @@ static void plugin_mgr_get_path_plugins(plugin_mgr_t *plugin_mgr)
+ #define LADSPA_SUBDIR "/PlugIns/ladspa"
+ #else
+ #define LADSPA_SUBDIR "/lib/ladspa"
++#endif
++#ifdef __ANDROID__
++    /* inside an APK the app directory is meaningless: LADSPA_PATH (the native library dir) is set by the app */
++    if (!ladspa_path)
+ #endif
+     {
+         ladspa_path = malloc(strlen(mlt_environment("MLT_APPDIR")) + strlen(LADSPA_SUBDIR) + 1);
